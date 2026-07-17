@@ -111,7 +111,7 @@ def {func_name}(**kwargs):
                 context_summary = "\\nPrevious results:\\n" + json.dumps(context, indent=2)[:3000]
 
             prompt = f"""You are executing step {{step_num}} of the "{name}" skill.
-Skill: {{description}}
+Skill: {description}
 Step: {{step}}
 Available tools: {{', '.join(t['function']['name'] for t in available_tools)}}
 {{context_summary}}

@@ -45,7 +45,7 @@ def check_disk_space(**kwargs):
                 context_summary = "\nPrevious results:\n" + json.dumps(context, indent=2)[:3000]
 
             prompt = f"""You are executing step {step_num} of the "check-disk-space" skill.
-Skill: {description}
+Skill: Check Disk Space
 Step: {step}
 Available tools: {', '.join(t['function']['name'] for t in available_tools)}
 {context_summary}
