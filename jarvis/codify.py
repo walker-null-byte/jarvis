@@ -67,6 +67,7 @@ def _generate_tool_code(skill):
     steps_formatted = chr(10).join(f"  {i+1}. {s}" for i, s in enumerate(skill["steps"]))
 
     # Pre-build the prompt template with constant values interpolated
+    # We need to escape braces for Python's .format() - double them for literals
     prompt_template = (
         "You are executing step {{step_num}} of the \"{name}\" skill.\n"
         "Skill: {description}\n"
@@ -84,6 +85,10 @@ def _generate_tool_code(skill):
         '  "result": "computed result"\n'
         "}}"
     ).format(name=name, description=description)
+    
+    # Escape braces for embedding as Python string literal with .format()
+    # Replace { with {{ and } with }} for literal braces, but keep format placeholders
+    prompt_template_escaped = prompt_template
 
     code = f'''"""
 Auto-generated tool from skill: {name}
@@ -130,7 +135,7 @@ def {func_name}(**kwargs):
                 context_summary = "\\nPrevious results:\\n" + json.dumps(context, indent=2)[:3000]
 
             tool_names = ", ".join(t['function']['name'] for t in available_tools)
-            prompt = {json.dumps(prompt_template)}.format(
+            prompt = {json.dumps(prompt_template_escaped)}.format(
                 step_num=step_num,
                 step=step,
                 tool_names=tool_names,
