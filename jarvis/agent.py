@@ -10,7 +10,7 @@ from .context import build_system_prompt, ensure_mind
 from .llm import LLM
 from .memory import EpisodeLog
 from .mind_tools import build_mind_tools
-from .tools_core import build_registry
+from .registry import get_registry
 
 MAX_TOOL_RESULT_CHARS = 8000
 
@@ -31,7 +31,7 @@ class Jarvis:
         self.mind = ensure_mind(self.config)
         self.episodes = EpisodeLog(self.mind)
         self.llm = LLM(self.config)
-        self.registry = build_registry()
+        self.registry = get_registry(self.config)
         for func in build_mind_tools(self.mind):
             self.registry.register(func)
         self.history = []  # conversation messages, system prompt excluded
