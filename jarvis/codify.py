@@ -57,12 +57,21 @@ def _parse_skill(path):
 
 # ---------- code generation ----------
 
-_STEP_EXECUTOR = '''"""
+def _generate_tool_code(skill):
+    """Generate a Python tool module that actually executes its steps."""
+    name = skill["name"]
+    func_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    description = skill["description"].replace('"', '\\"').replace('\n', ' ')
+    steps_json = json.dumps(skill["steps"])
+    tools_needed = ", ".join(skill["tools_needed"])
+    steps_formatted = chr(10).join(f"  {i+1}. {s}" for i, s in enumerate(skill["steps"]))
+
+    code = f'''"""
 Auto-generated tool from skill: {name}
 {description}
 
 Steps:
-{steps}
+{steps_formatted}
 
 Tools needed: {tools_needed}
 """
@@ -101,11 +110,11 @@ def {func_name}(**kwargs):
             if context:
                 context_summary = "\\nPrevious results:\\n" + json.dumps(context, indent=2)[:3000]
 
-            prompt = f"""You are executing step {step_num} of the "{name}" skill.
-Skill: {description}
+            prompt = f"""You are executing step {{step_num}} of the "{name}" skill.
+Skill: {{description}}
 Step: {{step}}
 Available tools: {{', '.join(t['function']['name'] for t in available_tools)}}
-{context_summary}
+{{context_summary}}
 
 Respond with ONLY a JSON object:
 {{
@@ -180,21 +189,6 @@ def register(registry):
     registry.register({func_name}, name={json.dumps(name)}, description={json.dumps(description)})
     return {func_name}
 '''
-
-
-def _generate_tool_code(skill):
-    """Generate a Python tool module that actually executes its steps."""
-    name = skill["name"]
-    func_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
-
-    code = _STEP_EXECUTOR.format(
-        name=name,
-        description=skill["description"].replace('"', '\\"').replace('\n', ' '),
-        steps=chr(10).join(f"  {i+1}. {s}" for i, s in enumerate(skill["steps"])),
-        tools_needed=", ".join(skill["tools_needed"]),
-        func_name=func_name,
-        steps_json=json.dumps(skill["steps"]),
-    )
     return code
 
 
