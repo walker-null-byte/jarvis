@@ -45,7 +45,7 @@ def check_disk_space(**kwargs):
                 context_summary = "\nPrevious results:\n" + json.dumps(context, indent=2)[:3000]
 
             tool_names = ", ".join(t['function']['name'] for t in available_tools)
-            prompt = "You are executing step {step_num} of the \"check-disk-space\" skill.\nSkill: Check Disk Space\nStep: {step}\nAvailable tools: {tool_names}\n{context_summary}\n\nRespond with ONLY a JSON object:\n{\n  \"tool\": \"tool_name\",\n  \"arguments\": {\"arg\": \"value\"}\n}\nOr if no tool is needed (e.g., pure computation), respond with:\n{\n  \"tool\": null,\n  \"result\": \"computed result\"\n}".format(
+            prompt = "You are executing step {step_num} of the \"check-disk-space\" skill.\nSkill: Check Disk Space\nStep: {step}\nAvailable tools: {tool_names}\n{context_summary}\n\nRespond with ONLY a JSON object:\n{{\n  \"tool\": \"tool_name\",\n  \"arguments\": {{\"arg\": \"value\"}}\n}}\nOr if no tool is needed (e.g., pure computation), respond with:\n{{\n  \"tool\": null,\n  \"result\": \"computed result\"\n}}".format(
                 step_num=step_num,
                 step=step,
                 tool_names=tool_names,

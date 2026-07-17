@@ -67,7 +67,8 @@ def _generate_tool_code(skill):
     steps_formatted = chr(10).join(f"  {i+1}. {s}" for i, s in enumerate(skill["steps"]))
 
     # Pre-build the prompt template with constant values interpolated
-    # Use double braces for literals in Python format strings
+    # Use QUADRUPLE braces for literals: after json.dumps they become double,
+    # then .format() makes them single in the final prompt
     prompt_template = (
         "You are executing step {{step_num}} of the \"{name}\" skill.\n"
         "Skill: {description}\n"
@@ -75,19 +76,18 @@ def _generate_tool_code(skill):
         "Available tools: {{tool_names}}\n"
         "{{context_summary}}\n\n"
         "Respond with ONLY a JSON object:\n"
-        "{{\n"
+        "{{{{\n"
         '  "tool": "tool_name",\n'
-        '  "arguments": {{"arg": "value"}}\n'
-        "}}\n"
+        '  "arguments": {{{{"arg": "value"}}}}\n'
+        "}}}}\n"
         "Or if no tool is needed (e.g., pure computation), respond with:\n"
-        "{{\n"
+        "{{{{\n"
         '  "tool": null,\n'
         '  "result": "computed result"\n'
-        "}}"
+        "}}}}"
     ).format(name=name, description=description)
     
-    # Escape braces for embedding as Python string literal with .format()
-    # Replace { with {{ and } with }} for literal braces, but keep format placeholders
+    # No additional escaping needed - json.dumps will handle it
     prompt_template_escaped = prompt_template
 
     code = f'''"""
