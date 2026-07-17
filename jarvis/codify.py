@@ -66,6 +66,25 @@ def _generate_tool_code(skill):
     tools_needed = ", ".join(skill["tools_needed"])
     steps_formatted = chr(10).join(f"  {i+1}. {s}" for i, s in enumerate(skill["steps"]))
 
+    # Pre-build the prompt template with constant values interpolated
+    prompt_template = (
+        "You are executing step {{step_num}} of the \"{name}\" skill.\n"
+        "Skill: {description}\n"
+        "Step: {{step}}\n"
+        "Available tools: {{tool_names}}\n"
+        "{{context_summary}}\n\n"
+        "Respond with ONLY a JSON object:\n"
+        "{{\n"
+        '  "tool": "tool_name",\n'
+        '  "arguments": {{"arg": "value"}}\n'
+        "}}\n"
+        "Or if no tool is needed (e.g., pure computation), respond with:\n"
+        "{{\n"
+        '  "tool": null,\n'
+        '  "result": "computed result"\n'
+        "}}"
+    ).format(name=name, description=description)
+
     code = f'''"""
 Auto-generated tool from skill: {name}
 {description}
@@ -110,22 +129,13 @@ def {func_name}(**kwargs):
             if context:
                 context_summary = "\\nPrevious results:\\n" + json.dumps(context, indent=2)[:3000]
 
-            prompt = f"""You are executing step {{step_num}} of the "{name}" skill.
-Skill: {description}
-Step: {{step}}
-Available tools: {{', '.join(t['function']['name'] for t in available_tools)}}
-{{context_summary}}
-
-Respond with ONLY a JSON object:
-{{
-  "tool": "tool_name",
-  "arguments": {{"arg": "value"}}
-}}
-Or if no tool is needed (e.g., pure computation), respond with:
-{{
-  "tool": null,
-  "result": "computed result"
-}}"""
+            tool_names = ", ".join(t['function']['name'] for t in available_tools)
+            prompt = {json.dumps(prompt_template)}.format(
+                step_num=step_num,
+                step=step,
+                tool_names=tool_names,
+                context_summary=context_summary
+            )
 
             messages = [
                 {{"role": "system", "content": "You are a tool executor. Output ONLY valid JSON."}},
