@@ -24,7 +24,17 @@ keep_recent = 8
 
 [paths]
 mind = "mind"
+models = "models"
 
 [voice]
-# Phase 5 — not wired up yet.
 enabled = false
+engine = "piper"  # "piper" or "kokoro"
+# Piper voice models (downloaded from rhasspy/piper-voices on HF)
+model = "en_US-lessac-medium"
+# Kokoro settings (if engine = "kokoro")
+kokoro_model = "hexgrad/Kokoro-82M"
+kokoro_voice = "af_sky"
+
+# STT settings
+stt_model = "small"  # faster-whisper model size: tiny, base, small, medium, large
+stt_device = "auto"  # "auto", "cpu", "cuda"
