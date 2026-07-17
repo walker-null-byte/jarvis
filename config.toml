@@ -1,0 +1,30 @@
+# Jarvis configuration
+
+[llm]
+# Any OpenAI-compatible endpoint works here.
+#   LM Studio:  http://localhost:1234/v1
+#   Ollama:     http://localhost:11434/v1
+#   llama.cpp:  http://localhost:8080/v1
+#   Gemini:     https://generativelanguage.googleapis.com/v1beta/openai/
+base_url = "http://localhost:1234/v1"
+model = "gemma4"
+# Name of the environment variable holding the API key (local servers ignore it).
+# For Gemini: set api_key_env = "GEMINI_API_KEY" and export the key.
+api_key_env = "JARVIS_API_KEY"
+stream = true
+max_tokens = 4096
+
+[agent]
+# Max tool-call rounds per user message before Jarvis is told to wrap up.
+max_tool_rounds = 20
+# Summarize older conversation once the in-context transcript exceeds this
+# many characters (~6k tokens), keeping the most recent messages verbatim.
+history_char_limit = 24000
+keep_recent = 8
+
+[paths]
+mind = "mind"
+
+[voice]
+# Phase 5 — not wired up yet.
+enabled = false

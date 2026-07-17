@@ -1,0 +1,23 @@
+so i want to make an agent wrapper called "Jarvis" inspired by Jarvis from iron man. heres what it should be - firstly it should be using an api for
+LLM and use contextaware for the MCP. the LLM will be self aware about itself.
+
+Jarvis has basic info about the user (which the user can feed).
+Jarvis can talk in text, or send a voice stream(by using tags like <voice> or anything that works. if you have better idea you can suggest me)
+the novel idea here is its memory system. we want it to learn, have a personality, remember things, and have skills. basically a memory system. 
+it should be novel with some new ideas on how to do that. for example if instead of an API we use local model, will it be feasible to fine tune it with the data we have acquired to make the learning permanent? or does it take hours even for those small learnings? otherwise we can just use the memory system.
+it also is self improving. lets say it learnt something new, it can add that to skills and also change its MCP code to add it there (possibly by a cron job or blocking, idk)
+basically we want it to improve itself in every way possible, even if  it means it can add new code to itself.
+
+it should have a few files like personality.md, skills.md memory.md etc. keep adding what you think is necessary (it should be inside a folder so that the LLM can read all of them)
+it should be a self improving architecture in all meanings and sense. it should have access to the system and should know about the system. 
+for example i told him to run something in my computer, it should run and monitor how it ran it and then learn and save it so that it can remember it later on.
+
+the UI can be either a pygame window with waveform visual like jarvis for audio, or maybe its better if its in a terminal window right? it should have a waveform along with text. 
+
+lets say i ask it to learn a skill like conversion of a file format. then after learning it it can make an mcp out of it. it should look good like this. 
+
+think more about this idea and add novelty to it. 
+
+some guardrails for you - make the coded simple. dont jumble the code so much that a human cant debug or change it. make them into modules and functions but dont overdo it. 
+
+think about it deeply and then create a plan, and discuss with me before we can start working  on it. 
