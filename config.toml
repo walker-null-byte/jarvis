@@ -27,7 +27,7 @@ mind = "mind"
 models = "models"
 
 [voice]
-enabled = false
+enabled = true
 engine = "piper"  # "piper" or "kokoro"
 # Piper voice models (downloaded from rhasspy/piper-voices on HF)
 model = "en_US-lessac-medium"

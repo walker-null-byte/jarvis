@@ -18,6 +18,8 @@ class Voice:
         self.models = ModelManager(models_dir)
         self._amplitude_cb = None
         self._speaking = False
+        # Target sample rate for playback (pulseaudio/pipewire default)
+        self._target_sr = 44100
 
     def set_amplitude_callback(self, cb):
         self._amplitude_cb = cb
@@ -35,6 +37,15 @@ class Voice:
     @property
     def is_speaking(self):
         return self._speaking
+
+    def _resample(self, audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+        """Simple linear interpolation resampling."""
+        if src_sr == dst_sr:
+            return audio
+        ratio = dst_sr / src_sr
+        new_len = int(len(audio) * ratio)
+        indices = np.linspace(0, len(audio) - 1, new_len)
+        return np.interp(indices, np.arange(len(audio)), audio).astype(np.int16)
 
 
 class PiperVoice(Voice):
@@ -84,14 +95,15 @@ class PiperVoice(Voice):
             self._emit_amplitude(0.0)
 
     def _play_audio(self, audio_bytes):
-        # Use simple sounddevice for playback
         try:
             import sounddevice as sd
             audio = np.frombuffer(audio_bytes, dtype=np.int16)
-            sd.play(audio, samplerate=self._voice.config.sample_rate)
+            src_sr = self._voice.config.sample_rate
+            # Resample to target sample rate
+            audio = self._resample(audio, src_sr, self._target_sr)
+            sd.play(audio, samplerate=self._target_sr, device="pulse")
             sd.wait()
         except ImportError:
-            # Fallback: write to temp file and use system player
             import tempfile
             import subprocess
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:

@@ -5,3 +5,4 @@ __pycache__/
 
 # Jarvis's memory is personal — don't commit it by default.
 mind/
+models/

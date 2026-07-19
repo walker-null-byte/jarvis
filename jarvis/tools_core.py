@@ -57,9 +57,47 @@ def list_dir(path: str = "."):
     return {"path": str(p), "entries": entries}
 
 
+def cron_add(name: str, schedule: str, instruction: str):
+    """Add a scheduled cron job that runs a headless Jarvis turn.
+
+    The job will execute the instruction at the given schedule.
+
+    Args:
+        name (str): Job name (kebab-case, used as filename)
+        schedule (str): Cron schedule expression (e.g., "0 2 * * *" for 2am daily)
+        instruction (str): Natural language instruction for Jarvis to execute
+    """
+    from jarvis.jobs import cron_add as _cron_add
+    return _cron_add(name, schedule, instruction)
+
+
+def cron_remove(name: str):
+    """Remove a scheduled cron job by name."""
+    from jarvis.jobs import cron_remove as _cron_remove
+    return _cron_remove(name)
+
+
+def cron_list():
+    """List all scheduled cron jobs."""
+    from jarvis.jobs import cron_list as _cron_list
+    return _cron_list()
+
+
+def cron_enable(name: str):
+    """Enable a disabled cron job."""
+    from jarvis.jobs import cron_enable as _cron_enable
+    return _cron_enable(name)
+
+
+def cron_disable(name: str):
+    """Disable a cron job without removing it."""
+    from jarvis.jobs import cron_disable as _cron_disable
+    return _cron_disable(name)
+
+
 def build_registry():
     registry = ContextAware(name="jarvis")
-    for func in (run_command, write_file, list_dir):
+    for func in (run_command, write_file, list_dir, cron_add, cron_remove, cron_list, cron_enable, cron_disable):
         registry.register(func)
     # From contextaware: read_file, calculate, get_current_time, get_system_info,
     # internet_search, webpage_scrape (the web ones need the [web] extra).
