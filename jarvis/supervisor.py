@@ -8,8 +8,10 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 
-# Ensure local contextaware is on path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contextaware"))
+# Ensure local contextaware AND jarvis are on path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "contextaware"))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from jarvis.config import load_config
 from jarvis.memory import EpisodeLog

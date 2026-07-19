@@ -3,9 +3,12 @@
 
 import sys
 import os
+from pathlib import Path
 
-# Ensure contextaware is importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "contextaware"))
+# Ensure contextaware and jarvis are importable - use absolute path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "contextaware"))
 
 from jarvis.config import load_config
 from jarvis.agent import Jarvis

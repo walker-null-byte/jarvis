@@ -267,6 +267,7 @@ def consolidate(mind=None, config=None, model_override=None, client=None):
     if week_episodes.strip():
         skills_dir = Path(mind) / "skills"
         skills_dir.mkdir(exist_ok=True)
+        existing = {p.stem for p in skills_dir.glob("*.md")}
         for sk in _draft_skills(client, model, week_episodes, skills_dir):
             name = sk.get("name")
             if not name or name in existing:
