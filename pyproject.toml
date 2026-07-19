@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "A self-improving personal AI agent with memory, voice, and tool-growing capabilities"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "dillu", email = "dillu@example.com"}
+]
+keywords = ["ai", "agent", "voice", "tts", "stt", "memory", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+    "openai>=1.0.0",
+    "textual>=0.50.0",
+    "piper-tts>=1.2.0",
+    "faster-whisper>=1.0.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.26.0",
+    "tomllib; python_version < '3.11'",
+    "turbomcp>=0.2.0",
+]
+
+[project.optional-dependencies]
+voice = [
+    "kokoro>=0.7.0",
+]
+web = [
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "ddgs>=0.3.0",
+    "googlesearch-python>=1.2.0",
+]
+semantic = [
+    "model2vec>=0.1.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+all = [
+    "kokoro>=0.7.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "ddgs>=0.3.0",
+    "googlesearch-python>=1.2.0",
+    "model2vec>=0.1.0",
+]
+
+[project.scripts]
+jarvis = "jarvis.__main__:main"
+jarvis-supervisor = "jarvis.supervisor:main"
+jarvis-codify = "jarvis.codify:main"
+jarvis-consolidate = "jarvis.consolidate:main"
+jarvis-mcp = "jarvis.mcp_server:main"
+jarvis-run-job = "jarvis.run_job:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jarvis*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.md", "*.toml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"

@@ -1,0 +1,24 @@
+[Unit]
+Description=JARVIS Personal AI Agent
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/Documents/jarvis
+Environment=PATH=/home/%i/Documents/jarvis/.venv/bin:/usr/bin:/bin
+ExecStart=/home/%i/Documents/jarvis/.venv/bin/python -m jarvis.supervisor
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/%i/Documents/jarvis/mind /home/%i/Documents/jarvis/tools /home/%i/Documents/jarvis/models
+
+[Install]
+WantedBy=default.target
