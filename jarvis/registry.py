@@ -6,7 +6,7 @@ import os
 import threading
 from pathlib import Path
 
-from contextaware import ContextAware
+from turbomcp import TurboMCP
 
 from .config import load_config, mind_dir
 from .tools_core import build_registry
@@ -14,7 +14,7 @@ from .mind_tools import build_mind_tools
 
 
 class ToolRegistry:
-    """ContextAware registry that hot-reloads tools/ directory on changes."""
+    """TurboMCP registry that hot-reloads tools/ directory on changes."""
 
     def __init__(self, config=None):
         self.config = config or load_config()
@@ -79,7 +79,7 @@ class ToolRegistry:
             self._load_tools_dir()
 
     def get_registry(self):
-        """Get the underlying ContextAware registry."""
+        """Get the underlying TurboMCP registry."""
         return self._registry
 
     # Delegate common methods to the underlying registry

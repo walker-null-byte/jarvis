@@ -1,4 +1,4 @@
-"""Jarvis's built-in tools, assembled into a ContextAware registry.
+"""Jarvis's built-in tools, assembled into a turbomcp registry.
 
 Learned tools (phase 4) will be hot-loaded into the same registry from tools/.
 """
@@ -7,7 +7,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from contextaware import ContextAware
+from turbomcp import TurboMCP
 
 
 def run_command(command: str, timeout: int = 60):
@@ -96,7 +96,7 @@ def cron_disable(name: str):
 
 
 def build_registry():
-    registry = ContextAware(name="jarvis")
+    registry = TurboMCP(name="jarvis")
     for func in (run_command, write_file, list_dir, cron_add, cron_remove, cron_list, cron_enable, cron_disable):
         registry.register(func)
     # From contextaware: read_file, calculate, get_current_time, get_system_info,

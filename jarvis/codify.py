@@ -1,7 +1,7 @@
 """Skill codification — turns drafted skill .md files into real Python tools.
 
 Reads mind/skills/*.md, generates tools/<name>.py, smoke-tests it, and
-hot-loads into the ContextAware registry. Every new tool is git-committed.
+hot-loads into the turbomcp registry. Every new tool is git-committed.
 """
 
 import importlib.util
@@ -101,7 +101,7 @@ Tools needed: {tools_needed}
 """
 
 import json
-from contextaware import ContextAware
+from turbomcp import TurboMCP
 
 
 def {func_name}(**kwargs):
@@ -200,7 +200,7 @@ def {func_name}(**kwargs):
 
 
 def register(registry):
-    """Register this tool with a ContextAware registry."""
+    """Register this tool with a TurboMCP registry."""
     registry.register({func_name}, name={json.dumps(name)}, description={json.dumps(description)})
     return {func_name}
 '''
@@ -217,8 +217,8 @@ def _smoke_test(tool_path, skill_name):
         spec.loader.exec_module(module)
 
         # Test registration
-        from contextaware import ContextAware
-        test_reg = ContextAware()
+        from turbomcp import TurboMCP
+        test_reg = TurboMCP()
         func = module.register(test_reg)
         assert func is not None
 

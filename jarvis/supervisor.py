@@ -8,9 +8,8 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 
-# Ensure local contextaware AND jarvis are on path
+# Ensure jarvis is on path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "contextaware"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from jarvis.config import load_config
@@ -21,7 +20,6 @@ def run_jarvis(args):
     """Run Jarvis with given args, return (exit_code, crash_info)."""
     cmd = [sys.executable, "-m", "jarvis"] + args
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent / "contextaware") + ":" + env.get("PYTHONPATH", "")
 
     proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = proc.communicate()

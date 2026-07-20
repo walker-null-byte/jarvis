@@ -11,7 +11,7 @@ Tools needed: run_command
 """
 
 import json
-from contextaware import ContextAware
+from turbomcp import TurboMCP
 
 
 def check_disk_space(**kwargs):
@@ -110,6 +110,6 @@ def check_disk_space(**kwargs):
 
 
 def register(registry):
-    """Register this tool with a ContextAware registry."""
+    """Register this tool with a TurboMCP registry."""
     registry.register(check_disk_space, name="check-disk-space", description="Check Disk Space")
     return check_disk_space

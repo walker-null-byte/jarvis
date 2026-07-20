@@ -2,13 +2,11 @@
 """Headless single-turn Jarvis for cron jobs."""
 
 import sys
-import os
 from pathlib import Path
 
-# Ensure contextaware and jarvis are importable - use absolute path
+# Ensure jarvis is importable - use absolute path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "contextaware"))
 
 from jarvis.config import load_config
 from jarvis.agent import Jarvis
