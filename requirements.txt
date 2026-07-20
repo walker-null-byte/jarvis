@@ -1,6 +1,6 @@
 openai
 textual
 # Non-editable on purpose: an editable install gets shadowed by the
-# ./contextaware repo folder when running from the project root.
-# After changing the library, reinstall with: pip install ./contextaware[web]
-./contextaware[web]
+# After changing the library, reinstall with: pip install turbomcp[web,semantic]
+turbomcp[web,semantic]
+piper-tts

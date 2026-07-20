@@ -1,5 +1,5 @@
 so i want to make an agent wrapper called "Jarvis" inspired by Jarvis from iron man. heres what it should be - firstly it should be using an api for
-LLM and use contextaware for the MCP. the LLM will be self aware about itself.
+LLM and use turbomcp for the MCP. the LLM will be self aware about itself.
 
 Jarvis has basic info about the user (which the user can feed).
 Jarvis can talk in text, or send a voice stream(by using tags like <voice> or anything that works. if you have better idea you can suggest me)

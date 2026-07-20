@@ -10,6 +10,12 @@ from .config import load_config
 
 def cli_loop(jarvis):
     print("JARVIS online. (exit with Ctrl-D or 'exit')\n")
+    
+    # Initialize voice for CLI
+    from jarvis.voice import get_voice
+    voice = get_voice(jarvis.config)
+    voice.set_amplitude_callback(lambda a: None)  # silent amplitude in CLI
+    
     while True:
         try:
             text = input("❯ ").strip()
@@ -32,6 +38,8 @@ def cli_loop(jarvis):
             if reply and not sys.stdout.isatty():
                 pass  # already streamed
             print("\n")
+            # Speak the reply
+            voice.speak(reply)
         except Exception as e:
             print(f"\n✗ {e}\n", file=sys.stderr)
 

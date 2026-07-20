@@ -115,7 +115,7 @@ A built-in tool lets Jarvis create jobs: `cron_add(name, schedule, instruction)`
 
 ## Build order
 
-0. ✅ **ContextAware overhaul** — JSON Schema, native MCP stdio server (+ lazy
+0. ✅ **turbomcp overhaul** — JSON Schema, native MCP stdio server (+ lazy
    mode, list_changed), bug fixes, zero-dep packaging, README. Publishable.
 1. ✅ **Core loop** — config, `llm.py`, `tools_core.py` (bash + files), TUI
    chat (Textual) + `--cli` mode, episode logging, mind/ scaffolding.
@@ -138,7 +138,7 @@ A built-in tool lets Jarvis create jobs: `cron_add(name, schedule, instruction)`
 
 ## Open items
 
-- "contextaware for the MCP" from the original notes — assumed to mean the
+- "turbomcp for the MCP" from the original notes — assumed to mean the
   MCP/tool layer should expose system context (OS, paths, running state).
   Correct this if it refers to a specific library.
 - Which local model server is running (Ollama? llama.cpp? LM Studio) — only

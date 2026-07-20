@@ -20,6 +20,7 @@ class Voice:
         self._speaking = False
         # Target sample rate for playback (pulseaudio/pipewire default)
         self._target_sr = 44100
+        self._speak_thread = None
 
     def set_amplitude_callback(self, cb):
         self._amplitude_cb = cb
@@ -33,6 +34,11 @@ class Voice:
 
     def stop(self):
         self._speaking = False
+
+    def wait(self):
+        """Wait for current speech to finish."""
+        if self._speak_thread and self._speak_thread.is_alive():
+            self._speak_thread.join()
 
     @property
     def is_speaking(self):

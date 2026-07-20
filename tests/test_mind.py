@@ -45,10 +45,10 @@ def test_fact_lifecycle():
 
 
 def test_mind_tools_register():
-    from contextaware import ContextAware
+    from turbomcp import TurboMCP
 
     with tempfile.TemporaryDirectory() as tmp:
-        reg = ContextAware()
+        reg = TurboMCP()
         for f in build_mind_tools(tmp):
             reg.register(f)
         assert set(reg.list_tools()) == {"remember", "recall", "forget"}

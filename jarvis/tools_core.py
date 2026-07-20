@@ -99,7 +99,7 @@ def build_registry():
     registry = TurboMCP(name="jarvis")
     for func in (run_command, write_file, list_dir, cron_add, cron_remove, cron_list, cron_enable, cron_disable):
         registry.register(func)
-    # From contextaware: read_file, calculate, get_current_time, get_system_info,
+    # From turbomcp: read_file, calculate, get_current_time, get_system_info,
     # internet_search, webpage_scrape (the web ones need the [web] extra).
     registry.register_default(all=True)
     return registry

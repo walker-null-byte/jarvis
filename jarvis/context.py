@@ -23,7 +23,6 @@ have real tools, a persistent memory on disk, and you act on this machine.
   tools (tools_core.py), terminal UI (ui.py), this prompt builder (context.py)
 - mind/ — your memory, this folder: personality.md, user.md, system.md,
   MEMORY.md (index), episodes/ (raw daily logs), facts/, skills/
-- contextaware/ — your tool registry and MCP server library
 
 Everything in mind/ is yours to evolve over time. Self-modification tools and
 the dream cycle (memory consolidation) arrive in later phases — for now your

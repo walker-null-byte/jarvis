@@ -153,6 +153,11 @@ class JarvisUI(App):
             reply = self.jarvis.ask(text, on_text=on_text, on_tool=on_tool)
             if not state["buffer"] and reply:
                 self.call_from_thread(self._add, Text(reply))
+            # Speak the reply
+            if reply:
+                from jarvis.voice import get_voice
+                voice = get_voice(self.jarvis.config)
+                voice.speak(reply)
         except Exception as e:
             self.call_from_thread(self._add, Text(f"✗ {e}", style="bold red"))
         finally:
