@@ -1,11 +1,11 @@
 """Terminal UI: a Textual app with a chat pane, waveform strip, and push-to-talk."""
 
 import json
-import threading
+import pyperclip
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll, Horizontal
-from textual.widgets import Input, Static
+from textual.widgets import Input, Static, RichLog
 from textual.binding import Binding
 
 
@@ -35,7 +35,6 @@ class JarvisUI(App):
     #banner { height: 1; content-align: center middle; color: $accent; text-style: bold; }
     #waveform { height: 1; content-align: center middle; padding: 0 2; }
     #chat { padding: 0 2; height: 1fr; }
-    #chat Static { margin-bottom: 1; }
     #input-row { height: 3; dock: bottom; padding: 0 2; }
     Input { width: 100%; }
     #status { height: 1; content-align: center middle; color: $text-muted; }
@@ -43,6 +42,8 @@ class JarvisUI(App):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit"),
         Binding("ctrl+space", "push_to_talk", "Push-to-Talk", show=False),
+        Binding("ctrl+c", "copy", "Copy", show=False),
+        Binding("ctrl+v", "paste", "Paste", show=False),
     ]
 
     def __init__(self, jarvis):
@@ -61,7 +62,7 @@ class JarvisUI(App):
     def compose(self) -> ComposeResult:
         yield Static("⏻  J A R V I S", id="banner")
         yield self._waveform
-        yield VerticalScroll(id="chat")
+        yield RichLog(id="chat", wrap=True, highlight=True, markup=True)
         yield Horizontal(
             Input(placeholder="Talk to Jarvis…  (Ctrl+Space for voice, Ctrl+Q to quit)", id="input"),
             id="input-row",
@@ -75,21 +76,37 @@ class JarvisUI(App):
     def _on_amplitude(self, amp: float):
         self.call_from_thread(self._waveform.set_amplitude, amp)
 
-    # ---------- chat helpers (UI thread only) ----------
-
     def _add(self, renderable):
         chat = self.query_one("#chat")
-        widget = Static(renderable)
-        chat.mount(widget)
-        chat.scroll_end(animate=False)
-        return widget
+        chat.write(renderable)
+        chat.scroll_end()
 
     def _update(self, widget, renderable):
-        widget.update(renderable)
-        self.query_one("#chat").scroll_end(animate=False)
+        # RichLog doesn't support updating specific lines easily
+        # For streaming, we'll use a different approach
+        pass
 
     def _set_status(self, text: str):
         self.call_from_thread(self.query_one("#status").update, text)
+
+    def action_copy(self):
+        """Copy selected text from chat."""
+        chat = self.query_one("#chat")
+        chat.copy()
+
+    def action_paste(self):
+        """Paste from clipboard into input."""
+        import pyperclip
+        text = pyperclip.paste()
+        if text:
+            input_widget = self.query_one("#input")
+            # Replace or append
+            if "\n" in text:
+                # Multiline - replace
+                input_widget.value = text
+            else:
+                input_widget.value += text
+            input_widget.focus()
 
     # ---------- push-to-talk ----------
 
@@ -134,27 +151,21 @@ class JarvisUI(App):
 
     def _turn(self, text):
         """Runs in a worker thread — all UI access goes via call_from_thread."""
-        state = {"widget": None, "buffer": ""}
+        state = {"buffer": ""}
 
         def on_text(token):
             state["buffer"] += token
-            if state["widget"] is None:
-                state["widget"] = self.call_from_thread(self._add, Text(state["buffer"]))
-            else:
-                self.call_from_thread(self._update, state["widget"], Text(state["buffer"]))
+            self.call_from_thread(self._add, Text(state["buffer"]))
 
         def on_tool(name, args):
             note = f"⚙ {name} {json.dumps(args, default=str)[:120]}"
             self.call_from_thread(self._add, Text(note, style="dim yellow"))
-            state["widget"] = None
-            state["buffer"] = ""
 
         try:
             reply = self.jarvis.ask(text, on_text=on_text, on_tool=on_tool)
-            if not state["buffer"] and reply:
-                self.call_from_thread(self._add, Text(reply))
-            # Speak the reply
             if reply:
+                self.call_from_thread(self._add, Text(reply))
+                # Speak the reply
                 from jarvis.voice import get_voice
                 voice = get_voice(self.jarvis.config)
                 voice.speak(reply)
