@@ -3,6 +3,21 @@ __pycache__/
 .venv/
 *.egg-info/
 
+# User-specific configuration (LLM endpoint, model, voice settings)
+config.toml
+config.local.toml
+
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+
 # Jarvis's memory is personal — don't commit it by default.
 mind/
 models/
+
+# Local deployment / logs
+jarvis.service
+*.log
+tmp/
+temp/

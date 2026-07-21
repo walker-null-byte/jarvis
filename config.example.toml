@@ -1,0 +1,44 @@
+# Jarvis configuration — copy to config.toml and edit
+# 
+# Any setting can also be overridden by environment variables with prefix JARVIS_
+# e.g., JARVIS_LLM_BASE_URL=http://localhost:11434/v1
+
+[llm]
+# Any OpenAI-compatible endpoint works:
+#   LM Studio:    http://localhost:1234/v1
+#   Ollama:       http://localhost:11434/v1
+#   llama.cpp:    http://localhost:8080/v1
+#   Gemini:       https://generativelanguage.googleapis.com/v1beta/openai/
+base_url = "http://localhost:1234/v1"
+model = "gemma-4"  # or whatever model your server serves
+# Name of the environment variable holding the API key (local servers ignore it)
+# For Gemini: set api_key_env = "GEMINI_API_KEY" and export the key
+api_key_env = "JARVIS_API_KEY"
+stream = true
+max_tokens = 4096
+
+[agent]
+# Max tool-call rounds per user message before Jarvis is told to wrap up
+max_tool_rounds = 20
+# Summarize older conversation once the in-context transcript exceeds this many chars (~6k tokens)
+history_char_limit = 24000
+keep_recent = 8
+
+[paths]
+# Where Jarvis stores its mind (episodes, facts, skills, personality)
+mind = "mind"
+# Where downloaded voice models are stored
+models = "models"
+
+[voice]
+enabled = false
+engine = "piper"  # "piper" or "kokoro"
+# Piper voice models (downloaded from rhasspy/piper-voices on HF)
+model = "en_US-lessac-medium"
+# Kokoro settings (if engine = "kokoro")
+kokoro_model = "hexgrad/Kokoro-82M"
+kokoro_voice = "af_sky"
+
+# STT settings
+stt_model = "small"  # faster-whisper model size: tiny, base, small, medium, large
+stt_device = "auto"  # "auto", "cpu", "cuda"
