@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>J.A.R.V.I.S. Dynamic Color Point Waveform</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: #030712;
+      color: #00f3ff;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #canvas-container {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+
+    /* HUD Controls Overlay */
+    .controls-card {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(6, 18, 36, 0.85);
+      border: 1px solid rgba(0, 243, 255, 0.3);
+      border-radius: 12px;
+      padding: 16px 24px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 0 25px rgba(0, 243, 255, 0.15);
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      z-index: 10;
+      max-width: 95vw;
+      flex-wrap: wrap;
+    }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .control-group label {
+      color: #8ae7ff;
+      font-weight: 600;
+    }
+
+    input[type="range"] {
+      appearance: none;
+      background: rgba(0, 243, 255, 0.2);
+      height: 4px;
+      border-radius: 2px;
+      outline: none;
+      width: 90px;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      appearance: none;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #00f3ff;
+      cursor: pointer;
+      box-shadow: 0 0 8px #00f3ff;
+    }
+
+    input[type="color"] {
+      border: none;
+      width: 28px;
+      height: 28px;
+      border-radius: 4px;
+      cursor: pointer;
+      background: transparent;
+    }
+
+    .toggle-btn {
+      background: rgba(0, 243, 255, 0.15);
+      border: 1px solid #00f3ff;
+      color: #00f3ff;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: bold;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 1px;
+      transition: all 0.2s ease;
+    }
+
+    .toggle-btn:hover {
+      background: #00f3ff;
+      color: #030712;
+      box-shadow: 0 0 15px #00f3ff;
+    }
+
+    .toggle-btn.active {
+      background: #00f3ff;
+      color: #030712;
+      box-shadow: 0 0 20px rgba(0, 243, 255, 0.8);
+    }
+  </style>
+</head>
+<body>
+
+  <div id="canvas-container"></div>
+
+  <!-- Simulation Control Panel -->
+  <div class="controls-card">
+    <button id="talkToggle" class="toggle-btn active">AI Speaking: ON</button>
+    <button id="simToggle" class="toggle-btn">Auto-Simulate Voice</button>
+
+    <div class="control-group">
+      <label for="primaryColorPicker">Color</label>
+      <input type="color" id="primaryColorPicker" value="#00f3ff">
+    </div>
+
+    <div class="control-group">
+      <label for="volume">Volume</label>
+      <input type="range" id="volume" min="0" max="1" step="0.01" value="0.7">
+    </div>
+
+    <div class="control-group">
+      <label for="pitch">Pitch</label>
+      <input type="range" id="pitch" min="0" max="1" step="0.01" value="0.5">
+    </div>
+
+    <div class="control-group">
+      <label for="bass">Bass</label>
+      <input type="range" id="bass" min="0" max="1" step="0.01" value="0.8">
+    </div>
+
+    <div class="control-group">
+      <label for="treble">Treble</label>
+      <input type="range" id="treble" min="0" max="1" step="0.01" value="0.4">
+    </div>
+
+    <div class="control-group">
+      <label for="dampening">Dampen</label>
+      <input type="range" id="dampening" min="0.01" max="0.3" step="0.01" value="0.08">
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <script>
+    // ==========================================
+    // 1. THREE.JS SCENE SETUP
+    // ==========================================
+    const container = document.getElementById('canvas-container');
+    const scene = new THREE.Scene();
+
+    const camera = new THREE.PerspectiveCamera(
+      60,
+      window.innerWidth / window.innerHeight,
+      0.1,
+      1000
+    );
+    camera.position.z = 4.2;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(renderer.domElement);
+
+    // Glowing Dot Texture
+    function createCircleTexture() {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64;
+      canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+      gradient.addColorStop(0.3, 'rgba(255, 255, 255, 0.8)');
+      gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 64, 64);
+      return new THREE.CanvasTexture(canvas);
+    }
+
+    const pointTexture = createCircleTexture();
+
+    // Color Targets
+    const targetPrimaryColor = new THREE.Color(0x00f3ff);
+    const currentPrimaryColor = new THREE.Color(0x00f3ff);
+
+    // Color Presets
+    const presets = {
+      jarvis: 0x00f3ff,
+      danger: 0xff0044,
+      warning: 0xffaa00,
+      matrix: 0x00ff66,
+      violet: 0xa855f7
+    };
+
+    // ==========================================
+    // 2. POINT CLOUD MESHES
+    // ==========================================
+
+    // Outer Point Sphere
+    const mainSphereGeo = new THREE.IcosahedronGeometry(1.2, 6);
+    const originalPositions = mainSphereGeo.attributes.position.clone();
+
+    const mainPointMat = new THREE.PointsMaterial({
+      color: currentPrimaryColor,
+      size: 0.045,
+      map: pointTexture,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    const mainSphere = new THREE.Points(mainSphereGeo, mainPointMat);
+    scene.add(mainSphere);
+
+    // Inner Core Point Sphere
+    const innerGeo = new THREE.IcosahedronGeometry(0.75, 4);
+    const innerPointMat = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 0.035,
+      map: pointTexture,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    const innerSphere = new THREE.Points(innerGeo, innerPointMat);
+    scene.add(innerSphere);
+
+    // Ambient Particles
+    const particleCount = 300;
+    const particleGeo = new THREE.BufferGeometry();
+    const particlePos = new Float32Array(particleCount * 3);
+
+    for (let i = 0; i < particleCount * 3; i += 3) {
+      const u = Math.random();
+      const v = Math.random();
+      const theta = u * 2.0 * Math.PI;
+      const phi = Math.acos(2.0 * v - 1.0);
+      const r = 1.8 + Math.random() * 1.0;
+
+      particlePos[i]     = r * Math.sin(phi) * Math.cos(theta);
+      particlePos[i + 1] = r * Math.sin(phi) * Math.sin(theta);
+      particlePos[i + 2] = r * Math.cos(phi);
+    }
+
+    particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePos, 3));
+    const particleMat = new THREE.PointsMaterial({
+      color: currentPrimaryColor,
+      size: 0.03,
+      map: pointTexture,
+      transparent: true,
+      opacity: 0.5,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    const particleCloud = new THREE.Points(particleGeo, particleMat);
+    scene.add(particleCloud);
+
+    // ==========================================
+    // 3. TARGET STATE & LERP DAMPENING
+    // ==========================================
+    const targetState = {
+      volume: 0.7,
+      pitch: 0.5,
+      bass: 0.8,
+      treble: 0.4,
+      speaking: true
+    };
+
+    const currentState = {
+      volume: 0.0,
+      pitch: 0.0,
+      bass: 0.0,
+      treble: 0.0
+    };
+
+    let lerpFactor = 0.08;
+
+    /**
+     * API Function for external updates
+     * @param {Object} inputs
+     * @param {number} [inputs.volume]
+     * @param {number} [inputs.pitch]
+     * @param {number} [inputs.bass]
+     * @param {number} [inputs.treble]
+     * @param {boolean} [inputs.speaking]
+     * @param {string|number} [inputs.color] - Optional Hex string ("#ff0055") or Preset name ("danger")
+     */
+    function updateWaveform(inputs) {
+      if (inputs.volume !== undefined) targetState.volume = inputs.volume;
+      if (inputs.pitch !== undefined) targetState.pitch = inputs.pitch;
+      if (inputs.bass !== undefined) targetState.bass = inputs.bass;
+      if (inputs.treble !== undefined) targetState.treble = inputs.treble;
+      if (inputs.speaking !== undefined) targetState.speaking = inputs.speaking;
+
+      // Handle optional color input
+      if (inputs.color !== undefined) {
+        if (typeof inputs.color === 'string' && presets[inputs.color.toLowerCase()]) {
+          targetPrimaryColor.setHex(presets[inputs.color.toLowerCase()]);
+        } else {
+          targetPrimaryColor.set(inputs.color);
+        }
+      }
+    }
+
+    function pseudoNoise(x, y, z, time) {
+      return Math.sin(x * 2.5 + time) * Math.cos(y * 2.5 + time) * Math.sin(z * 2.5 + time);
+    }
+
+    // ==========================================
+    // 4. ANIMATION LOOP WITH COLOR LERP
+    // ==========================================
+    let clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const elapsedTime = clock.getElapsedTime();
+
+      const targetAmp = targetState.speaking ? targetState.volume : 0.02;
+      const targetBass = targetState.speaking ? targetState.bass : 0.05;
+      const targetTreble = targetState.speaking ? targetState.treble : 0.02;
+      const targetPitch = targetState.speaking ? targetState.pitch : 0.2;
+
+      // Smooth Numerical Dampening
+      currentState.volume += (targetAmp - currentState.volume) * lerpFactor;
+      currentState.bass += (targetBass - currentState.bass) * lerpFactor;
+      currentState.treble += (targetTreble - currentState.treble) * lerpFactor;
+      currentState.pitch += (targetPitch - currentState.pitch) * lerpFactor;
+
+      // Smooth Color Lerp
+      currentPrimaryColor.lerp(targetPrimaryColor, lerpFactor);
+      mainPointMat.color.copy(currentPrimaryColor);
+      particleMat.color.copy(currentPrimaryColor);
+
+      // Rotations
+      mainSphere.rotation.y = elapsedTime * (0.2 + currentState.bass * 0.4);
+      mainSphere.rotation.x = elapsedTime * 0.1;
+      innerSphere.rotation.y = -elapsedTime * 0.5;
+
+      // Deform Outer Points
+      const positions = mainSphereGeo.attributes.position;
+      const origPositions = originalPositions;
+      const timeFreq = elapsedTime * (2.0 + currentState.pitch * 5.0);
+
+      for (let i = 0; i < positions.count; i++) {
+        const vx = origPositions.getX(i);
+        const vy = origPositions.getY(i);
+        const vz = origPositions.getZ(i);
+
+        const noiseVal = pseudoNoise(vx, vy, vz, timeFreq);
+        const displacement = 1.0 + (noiseVal * 0.4 * currentState.volume) + (Math.sin(timeFreq + i) * 0.1 * currentState.treble);
+
+        positions.setXYZ(i, vx * displacement, vy * displacement, vz * displacement);
+      }
+      positions.needsUpdate = true;
+
+      // Pulse Core
+      const innerScale = 1.0 + (currentState.bass * 0.2 * Math.sin(elapsedTime * 6));
+      innerSphere.scale.set(innerScale, innerScale, innerScale);
+
+      particleCloud.rotation.y = elapsedTime * 0.04;
+
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // ==========================================
+    // 5. LISTENERS & AUTO SIMULATION
+    // ==========================================
+    const talkBtn = document.getElementById('talkToggle');
+    const simBtn = document.getElementById('simToggle');
+    const colorPicker = document.getElementById('primaryColorPicker');
+    let autoSimInterval = null;
+
+    talkBtn.addEventListener('click', () => {
+      targetState.speaking = !targetState.speaking;
+      talkBtn.classList.toggle('active', targetState.speaking);
+      talkBtn.innerText = `AI Speaking: ${targetState.speaking ? 'ON' : 'OFF'}`;
+    });
+
+    colorPicker.addEventListener('input', (e) => {
+      updateWaveform({ color: e.target.value });
+    });
+
+    ['volume', 'pitch', 'bass', 'treble'].forEach(param => {
+      document.getElementById(param).addEventListener('input', (e) => {
+        updateWaveform({ [param]: parseFloat(e.target.value) });
+      });
+    });
+
+    document.getElementById('dampening').addEventListener('input', (e) => {
+      lerpFactor = parseFloat(e.target.value);
+    });
+
+    simBtn.addEventListener('click', () => {
+      if (autoSimInterval) {
+        clearInterval(autoSimInterval);
+        autoSimInterval = null;
+        simBtn.classList.remove('active');
+        simBtn.innerText = 'Auto-Simulate Voice';
+      } else {
+        simBtn.classList.add('active');
+        simBtn.innerText = 'Stop Simulation';
+        targetState.speaking = true;
+        talkBtn.classList.add('active');
+        talkBtn.innerText = 'AI Speaking: ON';
+
+        const simColors = ['#00f3ff', '#ff0055', '#ffaa00', '#00ff66', '#a855f7'];
+        let colorIdx = 0;
+
+        autoSimInterval = setInterval(() => {
+          const simVol = Math.random() * 0.85 + 0.15;
+          const simPitch = Math.sin(Date.now() * 0.004) * 0.4 + 0.5;
+          const simBass = Math.random() * 0.7 + 0.2;
+          const simTreble = Math.random() * 0.6 + 0.1;
+
+          document.getElementById('volume').value = simVol;
+          document.getElementById('pitch').value = simPitch;
+          document.getElementById('bass').value = simBass;
+          document.getElementById('treble').value = simTreble;
+
+          // Occasionally shift color preset during speech simulation
+          if (Math.random() < 0.08) {
+            colorIdx = (colorIdx + 1) % simColors.length;
+            colorPicker.value = simColors[colorIdx];
+            updateWaveform({ color: simColors[colorIdx] });
+          }
+
+          updateWaveform({
+            volume: simVol,
+            pitch: simPitch,
+            bass: simBass,
+            treble: simTreble
+          });
+        }, 100);
+      }
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>

@@ -88,6 +88,8 @@ Return a JSON array of objects, each with:
   "fact": "The fact stated plainly in one or two sentences."
   "why": "Why it matters / how it was learned."
   "name": "kebab-case-id"
+  "category": "preference, system, procedure, lesson, or general"
+  "confidence": 0.0 to 1.0
 
 If nothing worth keeping, return [].
 
@@ -118,7 +120,7 @@ def _detect_contradictions(client, model, facts_dir):
             parts = text.split("---", 2)
             if len(parts) >= 3:
                 body = parts[2].strip()
-                if body:
+                if body and "superseded_by:" not in parts[1]:
                     facts.append({"name": path.stem, "body": body})
 
     if len(facts) < 2:
@@ -130,7 +132,8 @@ current facts (name + body). Identify pairs that contradict each other.
 Return a JSON array of objects:
   "a": "name-of-first-fact"
   "b": "name-of-second-fact"
-  "resolution": "Which one is correct and why, or 'merge' if both have truth."
+  "keep": "a, b, or merge",
+  "resolution": "Which one is correct and why."
 
 If none, return [].
 
@@ -193,6 +196,7 @@ def _decay_facts(store, days_threshold=14, min_strength=0.25):
     """Decay facts that haven't been recalled in N days; archive very weak ones."""
     today = datetime.date.today()
     archived = 0
+    decayed = 0
     for path in Path(store.dir).glob("*.md"):
         data = store._read(path)
         meta = data["meta"]
@@ -208,13 +212,60 @@ def _decay_facts(store, days_threshold=14, min_strength=0.25):
             new_strength = round(max(min_strength, strength - 0.15), 2)
             meta["strength"] = new_strength
             store._write(path, meta, data["body"])
+            decayed += 1
         elif strength <= min_strength:
             # archive: move to facts/archive/
             archive_dir = Path(store.dir) / "archive"
             archive_dir.mkdir(exist_ok=True)
             path.rename(archive_dir / path.name)
             archived += 1
-    return archived
+    return {"archived": archived, "decayed": decayed}
+
+
+def _resolve_contradiction(store, contradiction):
+    """Apply one contradiction exactly once, retaining a recoverable archive."""
+    a = contradiction.get("a")
+    b = contradiction.get("b")
+    resolution = (contradiction.get("resolution") or "").strip()
+    keep = (contradiction.get("keep") or "").lower().strip()
+    if keep not in {"a", "b", "merge"}:
+        if "merge" in resolution.lower():
+            keep = "merge"
+        elif re.search(r"\b(b|second)\b", resolution.lower()):
+            keep = "b"
+        else:
+            keep = "a"
+    paths = {p.stem: p for p in Path(store.dir).glob("*.md")}
+    if a not in paths or b not in paths or a == b:
+        return False
+    a_data = store._read(paths[a])
+    b_data = store._read(paths[b])
+    if "superseded_by" in a_data["meta"] or "superseded_by" in b_data["meta"]:
+        return False
+
+    if keep == "b":
+        kept_name, kept, retired_name, retired = b, b_data, a, a_data
+    else:
+        kept_name, kept, retired_name, retired = a, a_data, b, b_data
+
+    if keep == "merge":
+        merged_note = f"Resolution: {resolution}" if resolution else "Resolution: merged contradictory evidence."
+        if merged_note not in kept["body"]:
+            kept["body"] += f"\n\n{merged_note}\nAdditional evidence: {retired['body']}"
+    elif resolution and f"Resolution: {resolution}" not in kept["body"]:
+        kept["body"] += f"\n\nResolution: {resolution}"
+    kept["meta"]["strength"] = round(float(kept["meta"].get("strength", 1.0)) + 0.5, 2)
+    kept["meta"]["correction_of"] = retired_name
+    kept["meta"]["provenance"] = resolution or "Contradiction resolution"
+    store._write(paths[kept_name], kept["meta"], kept["body"])
+
+    retired["meta"]["superseded_by"] = kept_name
+    retired["meta"]["superseded_reason"] = resolution or "Contradiction resolution"
+    archive_dir = Path(store.dir) / "archive"
+    archive_dir.mkdir(exist_ok=True)
+    store._write(archive_dir / f"{retired_name}.md", retired["meta"], retired["body"])
+    paths[retired_name].unlink()
+    return True
 
 
 # ---------- main entry ----------
@@ -240,7 +291,19 @@ def consolidate(mind=None, config=None, model_override=None, client=None):
     episodes = _read_today_episodes(mind)
     if episodes.strip():
         for item in _distill_facts(client, model, episodes):
-            r = store.remember(item["fact"], why=item.get("why", ""), name=item.get("name", ""))
+            if not isinstance(item, dict) or not str(item.get("fact", "")).strip():
+                continue
+            r = store.remember(
+                item["fact"],
+                why=item.get("why", ""),
+                name=item.get("name", ""),
+                source="consolidation",
+                source_episode=f"{datetime.date.today():%Y-%m-%d}",
+                confidence=item.get("confidence"),
+                category=item.get("category"),
+                provenance="Distilled from the daily episode log",
+                review_status="pending",
+            )
             if r["updated"]:
                 summary["facts_updated"] += 1
             else:
@@ -248,18 +311,7 @@ def consolidate(mind=None, config=None, model_override=None, client=None):
 
     # 2) Check for contradictions across the whole fact store
     for c in _detect_contradictions(client, model, store.dir):
-        a, b = c.get("a"), c.get("b")
-        res = c.get("resolution", "")
-        if not a or not b or a not in [p.stem for p in Path(store.dir).glob("*.md")]:
-            continue
-        # The resolution text becomes the new "why" for the kept fact
-        kept = a if "merge" not in res.lower() else a
-        path = Path(store.dir) / f"{kept}.md"
-        if path.exists():
-            data = store._read(path)
-            data["meta"]["strength"] = round(float(data["meta"].get("strength", 1.0)) + 0.5, 2)
-            data["body"] += f"\n\nCorrected: {res}"
-            store._write(path, data["meta"], data["body"])
+        if _resolve_contradiction(store, c):
             summary["contradictions_resolved"] += 1
 
     # 3) Draft new skills from repeated patterns
@@ -280,9 +332,9 @@ def consolidate(mind=None, config=None, model_override=None, client=None):
             summary["skills_drafted"] += 1
 
     # 4) Decay untouched facts; archive very weak ones
-    summary["facts_archived"] = _decay_facts(store)
-    summary["facts_decayed"] = sum(1 for p in Path(store.dir).glob("*.md")
-                                   if float(store._read(p)["meta"].get("strength", 1.0)) < 1.0)
+    decay = _decay_facts(store)
+    summary["facts_archived"] = decay["archived"]
+    summary["facts_decayed"] = decay["decayed"]
 
     # 5) Rebuild the index
     store.rebuild_index()

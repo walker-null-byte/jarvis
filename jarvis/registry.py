@@ -11,6 +11,7 @@ from turbomcp import TurboMCP
 from .config import load_config, mind_dir
 from .tools_core import build_registry
 from .mind_tools import build_mind_tools
+from .validation import validate_arguments
 
 
 class ToolRegistry:
@@ -30,7 +31,7 @@ class ToolRegistry:
 
     def _build_base_registry(self):
         """Build registry with core + mind tools (not learned tools)."""
-        reg = build_registry()
+        reg = build_registry(self.mind, self.config)
         for f in build_mind_tools(self.mind):
             reg.register(f)
         return reg
@@ -89,7 +90,20 @@ class ToolRegistry:
     def unregister(self, name):
         self._registry.unregister(name)
 
+    def set_approval_handler(self, approval):
+        if hasattr(self._registry, "_jarvis_policy"):
+            self._registry._jarvis_policy.set_approval_handler(approval)
+
+    def set_cancel_event(self, cancel_event):
+        self._registry._cancel_event = cancel_event
+
     def call(self, name, arguments=None):
+        arguments = arguments or {}
+        tool = self._registry.tools.get(name)
+        if tool:
+            error = validate_arguments(tool.get("input_schema", {}), arguments)
+            if error:
+                return {"error": error, "validation_error": True, "tool": name}
         return self._registry.call(name, arguments)
 
     def list_tools(self, with_summary=False):
@@ -153,22 +167,24 @@ class ToolRegistry:
             self._watcher_thread.join(timeout=2)
 
 
-# Global registry instance (lazy-initialized)
-_global_registry = None
+# Global registries (lazy-initialized per mind directory). Keeping one registry
+# per mind avoids cross-test/config contamination while retaining hot reload.
+_registries = {}
 
 
 def get_registry(config=None):
     """Get or create the global ToolRegistry."""
-    global _global_registry
-    if _global_registry is None:
-        _global_registry = ToolRegistry(config)
-        _global_registry._load_tools_dir()
-        _global_registry.start_watcher()
-    return _global_registry
+    cfg = config or load_config()
+    key = str(mind_dir(cfg).resolve())
+    if key not in _registries:
+        registry = ToolRegistry(cfg)
+        registry._load_tools_dir()
+        registry.start_watcher()
+        _registries[key] = registry
+    return _registries[key]
 
 
 def reload_tools():
     """Force a reload of the tools/ directory."""
-    global _global_registry
-    if _global_registry:
-        _global_registry.reload()
+    for registry in _registries.values():
+        registry.reload()

@@ -5,6 +5,7 @@ hot-loads into the turbomcp registry. Every new tool is git-committed.
 """
 
 import importlib.util
+import ast
 import json
 import re
 import subprocess
@@ -25,8 +26,11 @@ def _git(*args, cwd):
         pass
 
 
-def _git_commit(cwd, message):
-    _git("add", "-A", cwd=cwd)
+def _git_commit(cwd, message, paths=None):
+    if paths:
+        _git("add", "-A", "--", *[str(path) for path in paths], cwd=cwd)
+    else:
+        _git("add", "-A", cwd=cwd)
     _git("commit", "-m", message, cwd=cwd)
 
 
@@ -46,12 +50,16 @@ def _parse_skill(path):
             data["description"] = stripped[2:].strip()
         elif stripped.startswith("## "):
             current_section = stripped[3:].strip().lower()
-        elif stripped.startswith("- ") and current_section in ("steps", "tools needed", "tools"):
-            item = stripped[2:].strip()
+        elif current_section in ("steps", "tools needed", "tools") and (
+            stripped.startswith("- ") or re.match(r"^\d+[.)]\s+", stripped)
+        ):
+            item = re.sub(r"^(?:- |\d+[.)]\s+)", "", stripped).strip()
             if current_section == "steps":
                 data["steps"].append(item)
             else:
                 data["tools_needed"].append(item)
+        elif current_section in ("tools needed", "tools") and stripped:
+            data["tools_needed"].extend(item.strip() for item in stripped.split(",") if item.strip())
     return data
 
 
@@ -90,15 +98,14 @@ def _generate_tool_code(skill):
     # No additional escaping needed - json.dumps will handle it
     prompt_template_escaped = prompt_template
 
-    code = f'''"""
-Auto-generated tool from skill: {name}
+    module_doc = f"""Auto-generated tool from skill: {name}
 {description}
 
 Steps:
 {steps_formatted}
 
-Tools needed: {tools_needed}
-"""
+Tools needed: {tools_needed}"""
+    code = f'''{json.dumps(module_doc)}
 
 import json
 from turbomcp import TurboMCP
@@ -209,9 +216,37 @@ def register(registry):
 
 # ---------- smoke test ----------
 
+
+def _validate_generated_code(code):
+    """Reject generated modules with direct escape hatches before import."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return f"syntax error: {e}"
+
+    blocked_modules = {"os", "subprocess", "shutil", "socket", "ctypes", "multiprocessing"}
+    blocked_calls = {"eval", "exec", "compile", "__import__", "system", "popen", "remove", "unlink"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".", 1)[0] in blocked_modules:
+                    return f"blocked import: {alias.name}"
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".", 1)[0] in blocked_modules:
+                return f"blocked import: {node.module}"
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in blocked_calls:
+                return f"blocked call: {node.func.id}"
+            if isinstance(node.func, ast.Attribute) and node.func.attr in blocked_calls:
+                return f"blocked call: {node.func.attr}"
+    return ""
+
 def _smoke_test(tool_path, skill_name):
     """Import the generated module and call its register function."""
     try:
+        validation_error = _validate_generated_code(tool_path.read_text(encoding="utf-8"))
+        if validation_error:
+            return False, validation_error
         spec = importlib.util.spec_from_file_location(skill_name, tool_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -246,6 +281,9 @@ def codify_skills(mind=None, config=None):
 
     for skill_path in skills_dir.glob("*.md"):
         skill = _parse_skill(skill_path)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", skill["name"]):
+            results["errors"].append(f"{skill_path.name}: unsafe skill name")
+            continue
         if not skill["steps"]:
             results["errors"].append(f"{skill_path.name}: no steps found")
             continue
@@ -268,7 +306,7 @@ def codify_skills(mind=None, config=None):
 
     # Git commit if anything changed
     if results["generated"] > 0:
-        _git_commit(mind.parent, f"codify skills: generated {results['generated']} tools")
+        _git_commit(mind.parent, f"codify skills: generated {results['generated']} tools", [tools_dir])
 
     return results
 

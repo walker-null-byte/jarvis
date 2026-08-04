@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jarvis"
 version = "0.1.0"
-description = "A self-improving personal AI agent with memory, voice, and tool-growing capabilities"
+description = "A lightweight local-first terminal AI assistant and OpenAI-compatible Hermes alternative"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "dillu", email = "dillu@example.com"}
 ]
-keywords = ["ai", "agent", "voice", "tts", "stt", "memory", "mcp"]
+keywords = ["ai", "agent", "terminal", "local-ai", "openai-compatible", "hermes-alternative", "voice", "tts", "stt", "memory", "mcp", "lm-studio", "ollama", "llama.cpp", "gemini"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -31,7 +31,7 @@ dependencies = [
     "faster-whisper>=1.0.0",
     "sounddevice>=0.4.6",
     "numpy>=1.26.0",
-    "tomllib; python_version < '3.11'",
+    "tomli>=2.0; python_version < '3.11'",
     "turbomcp>=0.2.0",
 ]
 

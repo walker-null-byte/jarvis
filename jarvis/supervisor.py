@@ -4,7 +4,7 @@
 import os
 import sys
 import subprocess
-import traceback
+import json
 from pathlib import Path
 from datetime import datetime
 
@@ -21,8 +21,15 @@ def run_jarvis(args):
     cmd = [sys.executable, "-m", "jarvis"] + args
     env = os.environ.copy()
 
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = proc.communicate()
+    # Keep an interactive TUI attached to the user's terminal.  Captured pipes
+    # are useful for CLI crash reports but make Textual unusable.
+    interactive = "--cli" not in args and sys.stdin.isatty() and sys.stdout.isatty()
+    if interactive:
+        proc = subprocess.run(cmd, env=env, check=False)
+        stdout, stderr = b"", b""
+    else:
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = proc.communicate()
 
     crash_info = None
     if proc.returncode != 0:
@@ -39,11 +46,12 @@ def run_jarvis(args):
 
 def log_crash(config, crash_info):
     """Write crash info to episodes."""
-    episode = EpisodeLog(config["paths"]["mind"])
+    from jarvis.config import mind_dir
+    episode = EpisodeLog(mind_dir(config))
     episode.log("crash", f"Jarvis crashed:\n{json.dumps(crash_info, indent=2)}")
 
     # Also write a dedicated crash file for debugging
-    crash_dir = Path(config["paths"]["mind"]) / "crashes"
+    crash_dir = mind_dir(config) / "crashes"
     crash_dir.mkdir(exist_ok=True)
     crash_file = crash_dir / f"crash_{datetime.now():%Y%m%d_%H%M%S}.json"
     crash_file.write_text(json.dumps(crash_info, indent=2))
@@ -77,6 +85,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import json
-    from datetime import datetime
     main()

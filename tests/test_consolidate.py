@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from jarvis.consolidate import consolidate
+from jarvis.consolidate import _resolve_contradiction, consolidate
 from jarvis.memory import FactStore
 
 
@@ -137,6 +137,21 @@ def test_decay_and_archive():
         archived = list(archive_dir.glob("*.md"))
         assert len(archived) >= 1
         print("PASS test_decay_and_archive")
+
+
+def test_contradiction_resolution_is_idempotent_and_recoverable():
+    with tempfile.TemporaryDirectory() as tmp:
+        mind = Path(tmp) / "mind"
+        (mind / "facts").mkdir(parents=True)
+        store = FactStore(mind)
+        store.remember("The user prefers dark mode.", name="theme-a")
+        store.remember("The user prefers light mode.", name="theme-b")
+
+        contradiction = {"a": "theme-a", "b": "theme-b", "keep": "a", "resolution": "a is current"}
+        assert _resolve_contradiction(store, contradiction) is True
+        assert _resolve_contradiction(store, contradiction) is False
+        assert (store.dir / "theme-a.md").exists()
+        assert (store.dir / "archive" / "theme-b.md").exists()
 
 
 if __name__ == "__main__":

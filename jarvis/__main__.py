@@ -5,15 +5,25 @@ import json
 import sys
 
 from .agent import Jarvis
+from .commands import handle_slash_command
 from .config import load_config
 
 
 def cli_loop(jarvis):
     print("JARVIS online. (exit with Ctrl-D or 'exit')\n")
     
-    # Initialize voice for CLI
-    from jarvis.voice import get_voice
-    voice = get_voice(jarvis.config)
+    # Keep this reference current because /settings can replace the voice
+    # engine while the CLI is running.
+    voice = jarvis.voice
+
+    def approve(action, payload):
+        print(f"\n  ⚠ Approval required for {action}: {json.dumps(payload, default=str)[:240]}")
+        try:
+            return input("  Allow? [y/N] ").strip().lower() in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+    jarvis.approvals.set_fallback(approve)
     voice.set_amplitude_callback(lambda a: None)  # silent amplitude in CLI
     
     while True:
@@ -26,6 +36,13 @@ def cli_loop(jarvis):
             continue
         if text.lower() in ("exit", "quit"):
             break
+
+        command_result = handle_slash_command(jarvis, text)
+        if command_result is not None:
+            print(f"\n{command_result}\n")
+            voice = jarvis.voice
+            voice.set_amplitude_callback(lambda a: None)
+            continue
 
         def on_text(token):
             print(token, end="", flush=True)

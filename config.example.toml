@@ -10,12 +10,16 @@
 #   llama.cpp:    http://localhost:8080/v1
 #   Gemini:       https://generativelanguage.googleapis.com/v1beta/openai/
 base_url = "http://localhost:1234/v1"
+provider = "custom"  # custom, lmstudio, ollama, llama.cpp, openai, or gemini
 model = "gemma-4"  # or whatever model your server serves
 # Name of the environment variable holding the API key (local servers ignore it)
 # For Gemini: set api_key_env = "GEMINI_API_KEY" and export the key
 api_key_env = "JARVIS_API_KEY"
 stream = true
 max_tokens = 4096
+timeout = 120
+retries = 2
+retry_delay = 1.0
 
 [agent]
 # Max tool-call rounds per user message before Jarvis is told to wrap up
@@ -42,3 +46,21 @@ kokoro_voice = "af_sky"
 # STT settings
 stt_model = "small"  # faster-whisper model size: tiny, base, small, medium, large
 stt_device = "auto"  # "auto", "cpu", "cuda"
+stt_compute_type = "int8"  # faster-whisper compute type
+audio_device = ""  # optional sounddevice output device name/index
+
+[security]
+# "guarded" blocks destructive shell patterns and limits file tools to these roots.
+# Use "permissive" only on a trusted machine where the agent is fully trusted.
+mode = "guarded"
+allowed_roots = ["."]
+allow_outside_roots = false
+max_command_timeout = 300
+approval_timeout = 120
+
+[jobs]
+# "private-file" records requested jobs without modifying the system crontab.
+# Use "system" to install entries in the current user's crontab when available.
+# Status reports distinguish recorded-only, installed, and unavailable states.
+backend = "private-file"
+crontab_file = "~/.jarvis_crontab"

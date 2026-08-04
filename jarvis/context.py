@@ -104,23 +104,34 @@ def build_system_prompt(mind):
             if text:
                 sections.append(text)
 
-    now = datetime.datetime.now()
+    now = datetime.datetime.now().astimezone()
     sections.append(
         "# Right now\n"
-        f"- Date/time: {now:%A, %Y-%m-%d %H:%M}\n"
+        f"- Date/time: {now:%A, %Y-%m-%d %H:%M %Z (UTC%z)}\n"
         f"- Working directory: {os.getcwd()}\n"
     )
     sections.append(
         "# Operating instructions\n"
         "- Use your tools instead of guessing about this system; check, then answer.\n"
         "- Chain tools as needed, but stop and report once you have what you need.\n"
+        "- Launching long-running or GUI processes: use Python's subprocess.Popen\n"
+        "  with stdin/stdout/stderr=DEVNULL and start_new_session=True (a\n"
+        "  python3 -c one-liner). Do NOT use `nohup ... &` — the child keeps the\n"
+        "  output pipe open and the command looks like it hangs. Do NOT use `>`\n"
+        "  or `>>` shell redirects — the approval gate blocks them.\n"
+        "- Guarded security mode gates some command patterns (\">\", \">>\", sudo,\n"
+        "  etc.). If a command isn't approved, don't retry variations — adapt\n"
+        "  (capture output with Python open(...) instead of shell redirects) or\n"
+        "  hand the user the exact command to run themselves.\n"
         "- Your conversation memory is WIPED when the session ends. The only way\n"
         "  to keep information is the remember tool. If the user asks you to\n"
         "  remember something, you MUST call remember — replying 'noted' without\n"
         "  calling it silently loses the information. Same when you learn\n"
         "  something durable yourself: a preference, a machine quirk, a lesson.\n"
         "  One focused fact per call. Fix wrong memories with remember (same\n"
-        "  name) or forget.\n"
+        "  name) or forget. Consolidated facts may need memory_review before\n"
+        "  relying on them; honor memory_rules and never save anything matching\n"
+        "  a user's never-remember pattern.\n"
         "- The Memory index above lists what you know. Before answering any\n"
         "  question about the user, the system, or past events — you MUST call\n"
         "  recall first. Checking the index is not enough; call the tool.\n"

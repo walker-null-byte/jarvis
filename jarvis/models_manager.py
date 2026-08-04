@@ -1,7 +1,6 @@
 """Model management — download TTS/STT models from Hugging Face or use local drops."""
 
 import os
-import hashlib
 from pathlib import Path
 from urllib.request import urlretrieve
 from urllib.error import URLError
@@ -59,10 +58,13 @@ class ModelManager:
             return True
         try:
             print(f"[models] Downloading {dest.name}...")
-            urlretrieve(url, dest)
+            temporary = dest.with_suffix(dest.suffix + ".part")
+            urlretrieve(url, temporary)
+            temporary.replace(dest)
             return True
         except URLError as e:
             print(f"[models] Download failed: {e}")
+            temporary.unlink(missing_ok=True)
             return False
 
     def ensure_piper(self, model_name="en_US-lessac-medium"):
@@ -109,14 +111,18 @@ class ModelManager:
                 voices_path if voices_path.exists() else None)
 
     def ensure_whisper(self, model_name="small"):
-        """Ensure faster-whisper model is available. Returns model_dir or None."""
+        """Ensure faster-whisper model is available and return its real path."""
         model_dir = self.models_dir / "whisper" / model_name
         model_dir.mkdir(parents=True, exist_ok=True)
 
+        # A user may drop a CTranslate2 model into the configured location.
+        if any(model_dir.glob("*.bin")):
+            return str(model_dir)
+
         try:
             from faster_whisper import download_model
-            download_model(model_name, cache_dir=str(self.models_dir))
-            return str(model_dir)
+            downloaded = download_model(model_name, cache_dir=str(self.models_dir))
+            return str(downloaded) if downloaded else str(model_dir)
         except ImportError:
             print("[models] faster-whisper not installed")
             return None
@@ -130,10 +136,14 @@ class ModelManager:
         if not self.models_dir.exists():
             return models
 
-        for d in self.models_dir.iterdir():
-            if d.is_dir():
-                if d.name.startswith("piper"):
-                    models["piper"].append(d.name)
-                elif d.name.startswith("kokoro"):
-                    models["kokoro"].append(d.name)
+        for d in self.models_dir.rglob("*"):
+            if not d.is_dir():
+                continue
+            relative = str(d.relative_to(self.models_dir))
+            if relative.startswith("piper/"):
+                models["piper"].append(relative)
+            elif relative.startswith("kokoro/"):
+                models["kokoro"].append(relative)
+            elif relative.startswith("whisper/") and any(d.glob("*.bin")):
+                models["whisper"].append(relative)
         return models

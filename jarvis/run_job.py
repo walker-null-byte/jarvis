@@ -2,6 +2,7 @@
 """Headless single-turn Jarvis for cron jobs."""
 
 import sys
+import datetime
 from pathlib import Path
 
 # Ensure jarvis is importable - use absolute path
@@ -10,6 +11,17 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from jarvis.config import load_config
 from jarvis.agent import Jarvis
+from jarvis.jobs import set_job_status
+
+
+def _update_status(job_name, started, result, success, config):
+    return set_job_status(
+        job_name,
+        "succeeded" if success else "failed",
+        result,
+        config=config,
+        started=started,
+    )
 
 
 def main():
@@ -47,10 +59,23 @@ def main():
         print(f"No instruction found in job '{job_name}'")
         sys.exit(1)
 
-    # Run a single turn
-    jarvis = Jarvis(config)
-    reply = jarvis.ask(instruction)
-    print(reply)
+    # Run a single turn and persist an observable result for the job panel.
+    started = datetime.datetime.now().isoformat(timespec="seconds")
+    set_job_status(job_name, "running", config=config, started=started)
+    jarvis = None
+    try:
+        jarvis = Jarvis(config)
+        reply = jarvis.ask(instruction)
+        print(reply)
+        _update_status(job_name, started, reply, True, config)
+    except Exception as e:
+        _update_status(job_name, started, str(e), False, config)
+        print(f"Job failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        if jarvis is not None:
+            jarvis.close()
+            jarvis.registry.stop_watcher()
 
 
 if __name__ == "__main__":
