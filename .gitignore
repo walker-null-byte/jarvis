@@ -21,3 +21,8 @@ jarvis.service
 *.log
 tmp/
 temp/
+
+# Packaging output
+dist/
+build/
+*.egg-info/
