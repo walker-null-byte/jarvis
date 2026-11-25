@@ -27,7 +27,7 @@ llama.cpp, vLLM) or any API-key provider.
 ### 1. Install
 
 ```bash
-pipx install jarvis-ai          # or: pip install jarvis-ai
+pipx install jarvis-harness          # or: pip install jarvis-harness
 ```
 
 Your settings and memory live in `~/.jarvis` (set `JARVIS_HOME` to move them),
@@ -342,7 +342,7 @@ ruff check .
   `fetch_page` with contact extraction, 50 tool rounds + Continue.
 
 **Improved**
-- On PyPI as `jarvis-ai` (`pipx install jarvis-ai`). Installed copies keep
+- On PyPI as `jarvis-harness` (`pipx install jarvis-harness`). Installed copies keep
   their data in `~/.jarvis`; a git clone still uses its own folder.
 - DeepSeek thinking mode keeps its reasoning across tool calls.
 - Several agents can run at once; approvals reach the right one.

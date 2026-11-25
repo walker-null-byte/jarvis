@@ -3,7 +3,7 @@
 The home folder (ROOT) is, in order:
   1. $JARVIS_HOME, if set;
   2. the source checkout, when Jarvis runs from a git clone (pip install -e .);
-  3. ~/.jarvis for a normal install (pip install jarvis-ai).
+  3. ~/.jarvis for a normal install (pip install jarvis-harness).
 """
 
 try:

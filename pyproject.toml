@@ -3,7 +3,7 @@ requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jarvis-ai"
+name = "jarvis-harness"
 version = "1.1.2"
 description = "A local-first, self-improving AI agent with a web UI: any model provider, memory, tools, MCP, agents, routines and group discussions"
 readme = "README.md"
