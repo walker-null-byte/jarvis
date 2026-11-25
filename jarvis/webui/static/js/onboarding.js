@@ -2,8 +2,10 @@
 import { api } from "./api.js";
 import { avatar } from "./avatar.js";
 import { signInFlow, signInLink } from "./auth.js";
+import { Select } from "./combo.js";
 import { el, toast } from "./dom.js";
 import { icon } from "./icons.js";
+import { providerOptions, shortName } from "./switcher.js";
 
 const STEPS = ["Welcome", "Connect a model", "Choose a character", "Quick tour"];
 
@@ -143,28 +145,44 @@ export function openOnboarding(ctx) {
 
     // --- API key ---
     const keyBox = el("div", { class: "connect-body" });
-    const providerSel = el("select", { "aria-label": "API provider" });
-    const keyInput = el("input", { type: "text", autocomplete: "off", placeholder: "Env var name (e.g. OPENAI_API_KEY) or the key", "aria-label": "API key or env var name" });
-    const keyOut = el("span", { class: "note", role: "status" });
+    const providerSel = new Select({ label: "API provider", placeholder: "Loading…", onchange: () => syncKeyHint() });
+    const keyNote = el("p", { class: "key-status", role: "status" });
+    const keyInput = el("input", { type: "password", autocomplete: "new-password", spellcheck: false, placeholder: "Paste your key", "aria-label": "API key" });
     const keyUse = el("button", { type: "button", class: "primary", text: "Use this provider" });
     let providers = [];
     api("/providers").then((data) => {
       providers = data.providers.filter((p) => p.kind === "api_key" && p.id !== "custom");
-      providerSel.replaceChildren(...providers.map((p) => el("option", { value: p.id, text: p.label || p.id })));
+      providerSel.setOptions(providerOptions(providers, { skipCustom: true }).filter((o) => o.value !== "chatgpt"));
+      providerSel.setValue(providers[0]?.id || "");
+      syncKeyHint();
     }).catch(() => {});
+    function syncKeyHint() {
+      const p = providers.find((q) => q.id === providerSel.value);
+      const envName = p?.api_key_env;
+      keyInput.placeholder = envName ? `Paste your key (or leave empty to use ${envName})` : "Paste your key";
+      keyNote.className = `key-status ${p?.env_set ? "ok" : ""}`;
+      keyNote.replaceChildren(...(p ? [icon(p.env_set ? "check" : "info", 15),
+        el("span", { text: p.env_set ? `Using ${envName} from your environment.` : "A pasted key is kept for this session only, never saved to disk." })] : []));
+    }
     keyUse.addEventListener("click", () => {
       const chosen = providers.find((p) => p.id === providerSel.value);
       if (!chosen) return;
       const typed = keyInput.value.trim();
+      if (!typed && !chosen.env_set) {
+        keyNote.className = "key-status bad";
+        keyNote.replaceChildren(icon("alert", 15), el("span", { text: "Paste an API key first." }));
+        keyInput.focus();
+        return;
+      }
       // Keep the real preset (its backend matters, e.g. Anthropic); the server
       // applies the typed env var name or session-only key on top of it.
       const body = typed ? { provider: chosen.id, api_key_env: typed } : { provider: chosen.id };
-      useProvider(body, chosen.label || chosen.id).then(() => { keyInput.value = ""; });
+      useProvider(body, shortName(chosen)).then(() => { keyInput.value = ""; });
     });
-    keyBox.append(el("p", { class: "note", text: "Pay-as-you-go keys from OpenAI, Anthropic, OpenRouter and others. Leave the field empty to use the provider's usual environment variable." }),
-      el("label", { class: "field" }, el("span", { text: "Provider" }), providerSel),
-      el("label", { class: "field" }, el("span", { text: "API key or env var name" }), keyInput),
-      el("div", { class: "row" }, keyUse), keyOut);
+    keyBox.append(el("p", { class: "note", text: "Pay-as-you-go keys from OpenAI, Google, Anthropic, OpenRouter and others." }),
+      el("div", { class: "field" }, el("span", { text: "Provider" }), providerSel.node),
+      el("label", { class: "field" }, el("span", { text: "API key" }), keyInput),
+      keyNote, el("div", { class: "row" }, keyUse));
 
     async function useProvider(body, label) {
       result.replaceChildren(el("span", { class: "note", text: `Connecting to ${label}…` }));
@@ -173,13 +191,21 @@ export function openOnboarding(ctx) {
         ctx.setStatus(out.status);
         state.connected = true;
         const data = await api("/models").catch(() => ({ models: [], current: "" }));
-        const sel = el("select", { "aria-label": "Model" }, (data.models || []).map((m) => el("option", { value: m, text: m, selected: m === data.current })));
+        const known = (data.models || []).includes(data.current);
+        const choices = known ? data.models : ["", ...(data.models || [])];
+        const sel = el("select", { "aria-label": "Model" }, choices.map((m) => el("option", {
+          value: m, text: m || "Choose a model…", selected: m === (known ? data.current : "") })));
         sel.addEventListener("change", async () => {
+          if (!sel.value) return;
           try { const o = await api("/provider", { method: "POST", body: { provider: out.status.provider, model: sel.value } }); ctx.setStatus(o.status); }
           catch (error) { toast(error.message, "error"); }
         });
+        const status = out.ok === false
+          ? el("div", { class: "err-line" }, icon("alert", 16),
+            el("span", { text: `${label} is selected, but the connection test failed: ${out.message}` }))
+          : el("div", { class: "ok-line" }, icon("check", 16), el("strong", { text: `Connected to ${label}` }));
         result.replaceChildren(
-          el("div", { class: "ok-line" }, icon("check", 16), el("strong", { text: `Connected to ${label}` })),
+          status,
           (data.models || []).length
             ? el("label", { class: "field" }, el("span", { text: "Model" }), sel)
             : el("p", { class: "note", text: data.message || "No model list available. You can set a model later in Settings." }));

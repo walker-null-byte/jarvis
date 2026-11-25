@@ -15,12 +15,56 @@ const SUGGESTIONS = [
   "Write a small script to tidy a folder",
 ];
 
+// One-line summary of a tool call's arguments: path=".", name="x"
 function firstLine(args) {
-  const values = Object.values(args || {});
-  const pick = values.find((v) => typeof v === "string") ?? values[0];
-  if (pick === undefined) return "";
-  const text = typeof pick === "string" ? pick : JSON.stringify(pick);
-  return text.replace(/\s+/g, " ").slice(0, 90);
+  const parts = Object.entries(args || {}).map(([key, value]) => {
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    const flat = String(text).replace(/\s+/g, " ");
+    return `${key}=${flat.length > 48 ? `${flat.slice(0, 48)}…` : flat}`;
+  });
+  return parts.join("  ");
+}
+
+// Tool arguments as readable rows: strings keep their real line breaks instead of \n escapes.
+function argsView(args) {
+  const entries = Object.entries(args || {});
+  if (!entries.length) return el("div", { class: "tool-args empty", text: "(no arguments)" });
+  return el("div", { class: "tool-args" }, entries.map(([key, value]) => {
+    let text = typeof value === "string" ? value : formatJson(value, 4000);
+    if (text.length > 4000) text = `${text.slice(0, 4000)}\n… (truncated)`;
+    return el("div", { class: "arg" }, el("span", { class: "arg-key", text: key }), el("pre", { class: "arg-val", text }));
+  }));
+}
+
+function seconds(value) {
+  if (value < 1) return "<1s";
+  const n = Math.round(value);
+  return n >= 60 ? `${Math.floor(n / 60)}m ${String(n % 60).padStart(2, "0")}s` : `${n}s`;
+}
+
+// "gemma4 · 312 tokens · 41.2 tok/s · 7.6 s" (one or several model calls of a reply)
+export function statsLine(list) {
+  if (!list.length) return { text: "", title: "" };
+  const tokens = list.reduce((sum, s) => sum + (s.output_tokens || 0), 0);
+  const approx = list.some((s) => s.approx);
+  const timed = list.filter((s) => s.tok_per_s && s.gen_seconds);
+  const rate = timed.length
+    ? timed.reduce((sum, s) => sum + s.output_tokens, 0) / timed.reduce((sum, s) => sum + s.gen_seconds, 0)
+    : null;
+  const total = list.reduce((sum, s) => sum + (s.seconds || 0), 0);
+  const parts = [list[list.length - 1].model || ""];
+  if (tokens) parts.push(`${approx ? "~" : ""}${tokens.toLocaleString()} tokens`);
+  if (rate) parts.push(`${rate.toFixed(1)} tok/s`);
+  if (total) parts.push(`${total.toFixed(1)} s`);
+  if (list.length > 1) parts.push(`${list.length} steps`);
+  const ttft = list[0].ttft;
+  const input = list.reduce((sum, s) => sum + (s.input_tokens || 0), 0);
+  const title = [
+    ttft != null ? `First token after ${ttft.toFixed(2)} s` : "",
+    input ? `${input.toLocaleString()} prompt tokens` : "",
+    approx ? "Token count is an estimate (the server did not report usage)" : "",
+  ].filter(Boolean).join(" · ");
+  return { text: parts.filter(Boolean).join(" · "), title };
 }
 
 export class Chat {
@@ -33,17 +77,27 @@ export class Chat {
     this.records = new Map();
     this.hero = null;
     this.stick = true;
+    this.lastTop = 0;
+    // Follow the stream only while the reader is at the bottom. Content growth never
+    // lowers scrollTop, so a scroll *up* means the reader took over; reaching the
+    // bottom again hands control back.
     root.addEventListener("scroll", () => {
-      this.stick = this.nearBottom();
+      const top = root.scrollTop;
+      if (top < this.lastTop - 1) this.stick = false;
+      this.lastTop = top;
+      if (this.nearBottom()) this.stick = true;
       this.jump.hidden = this.stick;
     }, { passive: true });
     jumpButton.addEventListener("click", () => {
+      this.stick = true;
       this.root.scrollTo({ top: this.root.scrollHeight, behavior: "smooth" });
     });
     this.reset();
   }
 
   reset() {
+    for (const rec of this.records?.values() || []) if (rec.reasoning) clearInterval(rec.reasoning.interval);
+    for (const entry of this.approvals?.values() || []) clearInterval(entry.timer);
     this.clearHero();
     this.root.replaceChildren();
     this.cur = null;          // current assistant record
@@ -61,17 +115,22 @@ export class Chat {
 
   nearBottom() {
     const r = this.root;
-    return r.scrollHeight - r.scrollTop - r.clientHeight < 120;
+    return r.scrollHeight - r.scrollTop - r.clientHeight < 32;
   }
 
   scrollDown(force = false) {
-    if (force || this.stick) this.root.scrollTo({ top: this.root.scrollHeight, behavior: "instant" });
+    if (force) this.stick = true;
+    // The reader may have scrolled up since our last jump, before the scroll event was delivered.
+    else if (this.root.scrollTop < this.lastTop - 1 && !this.nearBottom()) this.stick = false;
+    if (this.stick) {
+      this.root.scrollTo({ top: this.root.scrollHeight, behavior: "instant" });
+      this.lastTop = this.root.scrollTop;
+    }
   }
 
-  add(node) {
+  add(node, before = null) {
     this.clearHero();
-    this.stick = this.nearBottom();
-    this.root.append(node);
+    if (before) before.before(node); else this.root.append(node);
     this.scrollDown();
   }
 
@@ -130,7 +189,7 @@ export class Chat {
   renderItem(item) {
     if (item.type === "user") this.userMessage(item.content, item.index);
     else if (item.type === "summary") this.summaryNote(item.content);
-    else if (item.type === "assistant") this.addText(item.content);
+    else if (item.type === "assistant") this.assistantItem(item);
     else if (item.type === "tool") this.toolCard(item);
     else if (item.type === "artifact") this.artifactCard(item.artifact);
   }
@@ -169,8 +228,8 @@ export class Chat {
 
   // ---------- user messages ----------
 
-  userMessage(text, index) {
-    this.cur = null;
+  userMessage(text, index, before = null) {
+    if (!before) this.closeCur();
     const body = el("div", { class: "msg-body plain", text });
     const edit = this.actionButton("pencil", "Edit message", () => this.startEdit(node, text));
     edit.classList.add("act-edit");
@@ -180,7 +239,7 @@ export class Chat {
       el("div", { class: "sr-only", text: "You" }),
       el("div", { class: "msg-main" }, body, actions));
     if (index !== undefined && index !== null) node.dataset.index = String(index);
-    this.add(node);
+    this.add(node, before);
     this.syncActions();
     return node;
   }
@@ -225,7 +284,7 @@ export class Chat {
   }
 
   summaryNote(text) {
-    this.cur = null;
+    this.closeCur();
     this.add(el("details", { class: "summary-note" },
       el("summary", { text: "Earlier conversation was summarized" }),
       el("div", { class: "md" }, renderMarkdown(text.slice(0, SUMMARY_LIMIT * 4)))));
@@ -247,12 +306,13 @@ export class Chat {
         this.copyButton(text), regen, speak);
       const typing = el("div", { class: "typing", role: "status", "aria-label": "Jarvis is working" },
         el("span"), el("span"), el("span"));
+      const statsNode = el("span", { class: "msg-stats" });
       const root = el("div", { class: `msg assistant${this.turnActive ? " streaming" : ""}` },
         el("div", { class: "msg-avatar" }, avatar(character, 28)),
         el("div", { class: "msg-main" },
           el("div", { class: "msg-role", text: (character && character.name) || "Jarvis" }),
-          body, typing, actions, host));
-      Object.assign(rec, { root, text, owner, actions, regen, host, typing });
+          body, typing, el("div", { class: "msg-foot" }, statsNode, actions), host));
+      Object.assign(rec, { root, text, owner, actions, regen, host, typing, statsNode, statsList: [] });
       this.records.set(root, rec);
       this.cur = rec;
       this.add(root);
@@ -293,9 +353,16 @@ export class Chat {
     this.syncActions();
   }
 
+  // Ends the current assistant record: a still-running thinking block is closed first.
+  closeCur() {
+    if (this.cur) this.finishReasoning(this.cur);
+    this.cur = null;
+  }
+
   endTurn() {
     this.turnActive = false;
     for (const [node, rec] of [...this.records]) {
+      this.finishReasoning(rec);
       rec.typing.remove();
       node.classList.remove("streaming");
       if (!rec.body.children.length && !rec.text()) { node.remove(); this.records.delete(node); }
@@ -305,7 +372,15 @@ export class Chat {
     this.syncActions();
   }
 
+  // A saved assistant message from the snapshot: thinking, then text, then its speed footer.
+  assistantItem(item) {
+    if (item.reasoning) this.reasoningBlock(item.reasoning, item.stats?.thinking_seconds);
+    if (item.content && item.content.trim()) this.addText(item.content);
+    if (item.stats) this.addStats(item.stats);
+  }
+
   addText(text) {
+    this.finishReasoning(this.assistant());
     const seg = this.textSegment();
     seg.text += text;
     this.renderSegment(seg);
@@ -327,30 +402,75 @@ export class Chat {
     this.renderQueued.add(seg);
     requestAnimationFrame(() => {
       this.renderQueued.delete(seg);
-      this.stick = this.nearBottom();
       seg.node.replaceChildren(renderMarkdown(seg.text));
       this.scrollDown();
     });
   }
 
+  // Live thinking: open, streaming, "Thinking… 3s"; collapses to "Thought for 3s" when the answer starts.
   addReasoning(text) {
     const cur = this.assistant();
-    if (!cur.reasoning) {
+    let r = cur.reasoning;
+    if (!r) {
+      const label = el("span", { class: "r-label", text: "Thinking…" });
+      const timer = el("span", { class: "r-time", text: "0s" });
+      const summary = el("summary", {}, icon("sparkle", 13), label, timer);
       const content = el("div", { class: "reasoning-text" });
-      const node = el("details", { class: "reasoning" }, el("summary", {}, icon("sparkle", 13), "Reasoning"), content);
-      cur.reasoning = { node, content };
+      const node = el("details", { class: "reasoning live", open: true }, summary, content);
+      r = { node, content, label, timer, started: performance.now(), manual: false, interval: 0 };
+      summary.addEventListener("click", () => { r.manual = true; }); // the reader's choice wins over auto-collapse
+      r.interval = setInterval(() => { timer.textContent = seconds((performance.now() - r.started) / 1000); }, 250);
+      cur.reasoning = r;
+      cur.root.classList.add("thinking");
       cur.body.append(node);
-      cur.seg = null; // text after the reasoning starts a new segment
+      cur.seg = null; // text after the thinking starts a new segment
     }
-    this.stick = this.nearBottom();
-    cur.reasoning.content.textContent += text;
+    r.content.textContent += r.content.textContent ? text : text.replace(/^\s+/, "");
+    r.content.scrollTop = r.content.scrollHeight;
     this.scrollDown();
+  }
+
+  finishReasoning(cur) {
+    const r = cur && cur.reasoning;
+    if (!r) return;
+    clearInterval(r.interval);
+    r.label.textContent = `Thought for ${seconds((performance.now() - r.started) / 1000)}`;
+    r.timer.textContent = "";
+    r.node.classList.remove("live");
+    if (!r.manual) r.node.open = false;
+    cur.root.classList.remove("thinking");
+    cur.lastThought = r.label; // the server's own timing replaces our estimate when stats arrive
+    cur.reasoning = null;
+  }
+
+  // Saved thinking (after a reload): collapsed, with the recorded duration when known.
+  reasoningBlock(text, secs) {
+    const cur = this.assistant();
+    const label = secs != null ? `Thought for ${seconds(secs)}` : "Reasoning";
+    cur.body.append(el("details", { class: "reasoning" },
+      el("summary", {}, icon("sparkle", 13), el("span", { class: "r-label", text: label })),
+      el("div", { class: "reasoning-text", text })));
+    cur.seg = null;
+  }
+
+  addStats(stats) {
+    const cur = this.cur || this.lastAssistant();
+    if (!cur || !stats) return;
+    cur.statsList.push(stats);
+    if (cur.lastThought && stats.thinking_seconds != null) {
+      cur.lastThought.textContent = `Thought for ${seconds(stats.thinking_seconds)}`;
+    }
+    cur.lastThought = null;
+    const { text, title } = statsLine(cur.statsList);
+    cur.statsNode.textContent = text;
+    cur.statsNode.title = title;
   }
 
   // ---------- tools ----------
 
   toolCard(item, running = false) {
     const cur = this.assistant();
+    this.finishReasoning(cur);
     const state = running ? "running" : (item.status === "pending" ? "done" : item.status || "done");
     const status = el("span", { class: `tool-status ${state}`, text: state });
     const spin = el("span", { class: "spin", "aria-hidden": "true" });
@@ -364,7 +484,7 @@ export class Chat {
     const card = el("details", { class: `tool ${state}` }, summary,
       el("div", { class: "tool-detail" },
         el("div", { class: "tool-label", text: "arguments" }),
-        el("pre", { class: "tool-args", text: formatJson(item.args || {}, 3000) }),
+        argsView(item.args),
         el("div", { class: "tool-label", text: "result" }), result));
     cur.body.append(card);
     cur.seg = null;
@@ -422,7 +542,7 @@ export class Chat {
     const timer = setInterval(tick, 1000);
     tick();
     this.approvals.set(data.request_id, { card, buttons, outcome, countdown, timer });
-    this.cur = null;
+    this.closeCur();
     this.add(card);
   }
 
@@ -441,6 +561,7 @@ export class Chat {
   artifactCard(artifact) {
     if (!artifact) return;
     const cur = this.assistant();
+    this.finishReasoning(cur);
     cur.body.append(el("div", { class: "artifact" },
       el("div", { class: "artifact-title" }, el("strong", { text: artifact.title || "Artifact" }),
         el("span", { class: "badge", text: artifact.type })),
@@ -449,18 +570,22 @@ export class Chat {
     this.scrollDown();
   }
 
-  errorBanner(message) {
-    this.cur = null;
+  errorBanner(data) {
+    this.closeCur();
+    const { message = "Unknown error", details = "", status } = typeof data === "string" ? { message: data } : data;
+    const extra = details && details.trim() && details.trim() !== message.trim() ? details : "";
     this.add(el("div", { class: "error-banner", role: "alert" },
-      el("div", { class: "error-head" }, icon("alert", 16), el("strong", { text: "Something went wrong" })),
+      el("div", { class: "error-head" }, icon("alert", 16), el("strong", { text: "Something went wrong" }),
+        status ? el("span", { class: "badge", text: `HTTP ${status}` }) : null),
       el("p", { class: "error-text", text: message }),
+      extra ? el("details", { class: "error-details" }, el("summary", { text: "Details" }), el("pre", { text: extra })) : null,
       el("div", { class: "error-actions" },
         el("button", { type: "button", class: "primary small", text: "Switch model/provider", onclick: () => this.hooks.switchModel() }),
         el("button", { type: "button", class: "small", text: "Retry", onclick: () => this.hooks.retry() }))));
   }
 
   commandOutput(command, output) {
-    this.cur = null;
+    this.closeCur();
     this.add(el("div", { class: "cmd-output" },
       el("div", { class: "tool-label", text: command }),
       el("pre", { class: "tool-result", text: output || "(no output)" })));
@@ -477,17 +602,22 @@ export class Chat {
     const data = msg.data || {};
     switch (msg.kind) {
       case "user_message": {
-        const last = this.root.lastElementChild;
+        const users = this.root.querySelectorAll(".msg.user");
+        const last = users[users.length - 1];
         const fresh = Date.now() - this.loadedAt < 2000;
         // A snapshot refetch may already contain this message: don't show it twice.
-        if (fresh && last && last.classList.contains("user")
-            && last.querySelector(".msg-body").textContent === data.content) break;
+        if (fresh && last && last.querySelector(".msg-body").textContent === data.content) break;
         this.streamed = false;
         this.stick = true; // your own message always scrolls to the bottom
-        this.userMessage(data.content);
+        // If the typing placeholder is already up (older event order), slot the message above it.
+        const placeholder = this.turnActive && this.cur && !this.cur.body.children.length ? this.cur.root : null;
+        this.userMessage(data.content, undefined, placeholder);
         break;
       }
-      case "turn_started": this.beginTurn(); break;
+      case "turn_started":
+        for (const old of this.root.querySelectorAll(".error-banner")) old.remove(); // a retry replaces the old error
+        this.beginTurn();
+        break;
       case "assistant_delta": this.streamed = true; this.addText(data.content); break;
       case "assistant_reasoning_delta": this.addReasoning(data.content); break;
       case "assistant_message":
@@ -498,7 +628,8 @@ export class Chat {
       case "artifact_created": this.artifactCard(data.artifact); break;
       case "approval_requested": this.approvalRequested(data); break;
       case "approval_finished": this.approvalFinished(data); break;
-      case "error": this.errorBanner(data.message || "Unknown error"); break;
+      case "assistant_stats": this.addStats(data.stats); break;
+      case "error": this.errorBanner(data); break;
       case "turn_finished":
         if (data.status === "cancelled") this.note("Turn cancelled");
         if (data.status === "budget_exhausted") this.note("Tool budget for this turn was used up");

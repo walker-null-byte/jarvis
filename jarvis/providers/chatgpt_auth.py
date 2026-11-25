@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 import tempfile
 import threading
 import time
@@ -47,11 +48,25 @@ TERMINAL_REFRESH_ERRORS = {
     "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused",
 }
 
-_DONE_PAGE = (
-    b"<!doctype html><meta charset=utf-8><title>Jarvis</title>"
-    b"<body style='font-family:sans-serif;text-align:center;margin-top:20vh'>"
-    b"<h2>Signed in &mdash; you can close this tab.</h2></body>"
+PLAN_MESSAGE = (
+    "Signed in, but OpenAI did not allow Jarvis to use this account's ChatGPT plan "
+    f"(the {REQUIRED_SCOPE} permission was not granted). This usually means the "
+    "account's plan isn't eligible (e.g. a Free plan)."
 )
+CALLBACK_WAIT = 60  # seconds the browser tab waits for the token exchange
+
+
+def _result_page(ok, message):
+    """The page shown in the browser tab after the OAuth redirect."""
+    from html import escape
+
+    title = "Signed in" if ok else "Sign-in failed"
+    body = escape(message)
+    return (
+        "<!doctype html><meta charset=utf-8><title>Jarvis</title>"
+        "<body style='font-family:sans-serif;text-align:center;margin:20vh auto;max-width:40em'>"
+        f"<h2>{title}</h2><p>{body}</p></body>"
+    ).encode("utf-8")
 
 
 def auth_file_path():
@@ -141,7 +156,7 @@ class ChatGPTAuth:
         plan_ok = signed_in and REQUIRED_SCOPE in scopes
         error = self._error
         if signed_in and not plan_ok and not error:
-            error = f"Granted scopes lack {REQUIRED_SCOPE}; ChatGPT Plus or Pro is required"
+            error = PLAN_MESSAGE
         return {
             "signed_in": signed_in,
             "email": data.get("email", "") if signed_in else "",
@@ -223,6 +238,8 @@ class ChatGPTAuth:
             "verifier": secrets.token_urlsafe(64),
             "params": None,
             "received": threading.Event(),
+            "finished": threading.Event(),  # code exchange over; "outcome" is set
+            "outcome": (False, ""),
             "done": threading.Event(),
         }
         attempt["auth_url"] = self.build_authorize_url(attempt, data)
@@ -272,9 +289,16 @@ class ChatGPTAuth:
             if not attempt["received"].wait(300):
                 raise LLMError("ChatGPT sign-in timed out")
             self.complete_login(attempt, attempt["params"])
+            if self._error:  # signed in, but without plan access
+                attempt["outcome"] = (False, self._error)
+            else:
+                attempt["outcome"] = (True, "You can close this tab and return to Jarvis.")
         except Exception as error:
             self._error = str(error)
+            attempt["outcome"] = (False, f"{error}. Return to Jarvis and try again.")
+            print(f"[jarvis] ChatGPT sign-in failed: {error}", file=sys.stderr, flush=True)
         finally:
+            attempt["finished"].set()
             server = attempt.get("server")
             if server is not None:
                 threading.Thread(target=server.shutdown, daemon=True).start()
@@ -289,7 +313,10 @@ class ChatGPTAuth:
         if params.get("error") == "access_denied":
             raise LLMError("ChatGPT sign-in was cancelled")
         if params.get("error"):
-            raise LLMError(f"ChatGPT sign-in failed: {params['error']}")
+            detail = params.get("error_description")
+            raise LLMError(
+                f"ChatGPT sign-in failed: {params['error']}" + (f" ({detail})" if detail else "")
+            )
         code = params.get("code")
         if not code:
             raise LLMError("ChatGPT sign-in failed: no authorization code returned")
@@ -334,9 +361,7 @@ class ChatGPTAuth:
             data["tokens"]["id_token"] = token["id_token"]
             self._save(data)
             if REQUIRED_SCOPE not in data["tokens"]["scope"].split():
-                self._error = (
-                    f"Granted scopes lack {REQUIRED_SCOPE}; ChatGPT Plus or Pro is required"
-                )
+                self._error = PLAN_MESSAGE
 
     # ---- token endpoint ------------------------------------------------
 
@@ -433,12 +458,18 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         self.attempt["params"] = {k: v[0] for k, v in parse_qs(url.query).items()}
+        self.attempt["received"].set()
+        # Answer only once the code exchange has finished, so the tab tells the truth.
+        if self.attempt["finished"].wait(CALLBACK_WAIT):
+            ok, message = self.attempt["outcome"]
+        else:
+            ok, message = False, "Still finishing — check Jarvis for the result."
+        page = _result_page(ok, message)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(_DONE_PAGE)))
+        self.send_header("Content-Length", str(len(page)))
         self.end_headers()
-        self.wfile.write(_DONE_PAGE)
-        self.attempt["received"].set()
+        self.wfile.write(page)
 
     def log_message(self, *args):
         pass  # the query string holds the auth code; never log it

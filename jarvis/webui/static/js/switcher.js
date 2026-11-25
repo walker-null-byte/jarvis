@@ -4,11 +4,32 @@ import { el, toast } from "./dom.js";
 import { icon } from "./icons.js";
 import { signInFlow, signInLink } from "./auth.js";
 
-const KINDS = [
+export const KINDS = [
   ["subscription", "Subscription", "cloud"],
   ["local", "Local", "server"],
   ["api_key", "API key", "key"],
 ];
+
+export function providerKind(p) {
+  return p.kind || (p.id === "chatgpt" ? "subscription" : "api_key");
+}
+
+// "Google Gemini — API key" -> name "Google Gemini", detail "API key".
+export function shortName(p) { return (p.label || p.id).split(" — ")[0]; }
+export function detailLine(p) {
+  if (p.id === "custom") return "Any OpenAI-compatible endpoint";
+  const rest = (p.label || "").split(" — ")[1] || "";
+  return rest ? rest[0].toUpperCase() + rest.slice(1) : "";
+}
+export function providerOptions(providers, { skipCustom = false } = {}) {
+  const out = [];
+  for (const [kind, title] of KINDS) {
+    const items = providers.filter((p) => providerKind(p) === kind && p.id !== "custom");
+    if (kind === "api_key" && !skipCustom) items.push(...providers.filter((p) => p.id === "custom"));
+    for (const p of items) out.push({ value: p.id, label: shortName(p), sub: detailLine(p), group: title });
+  }
+  return out;
+}
 
 export class Switcher {
   constructor(pill, menu, ctx) {
@@ -44,8 +65,10 @@ export class Switcher {
       this.providers = providers;
       this.active = active;
       this.models = models.models || [];
-      this.modelNote = models.ok === false ? models.message : "";
       this.chatgpt = chatgpt;
+      const needsLogin = active === "chatgpt" && !(chatgpt && chatgpt.signed_in);
+      this.modelNote = needsLogin ? "Sign in with ChatGPT above to see its models." : models.ok === false ? models.message : "";
+      if (needsLogin) this.models = [];
       this.draw();
       this.menu.scrollTop = 0;
       this.menu.querySelector(".prov-btn.active")?.scrollIntoView({ block: "nearest" });
@@ -59,7 +82,7 @@ export class Switcher {
     const status = this.ctx.status || {};
     const parts = [];
     for (const [kind, title, iconName] of KINDS) {
-      const group = this.providers.filter((p) => p.id !== "custom" && (p.kind || (p.id === "chatgpt" ? "subscription" : "api_key")) === kind);
+      const group = this.providers.filter((p) => (p.id !== "custom" || this.active === "custom") && providerKind(p) === kind);
       if (!group.length) continue;
       parts.push(el("div", { class: "menu-group" },
         el("div", { class: "menu-title" }, icon(iconName, 13), title),
@@ -80,7 +103,7 @@ export class Switcher {
     filter.addEventListener("input", () => { this.filter = filter.value; drawModels(); });
     drawModels();
     parts.push(el("div", { class: "menu-group" },
-      el("div", { class: "menu-title" }, `Model · ${current?.label || this.active}`), filter, list));
+      el("div", { class: "menu-title" }, `Model · ${current ? shortName(current) : this.active}`), filter, list));
     this.menu.replaceChildren(...parts);
   }
 
@@ -90,8 +113,10 @@ export class Switcher {
       el("button", {
         type: "button", class: `prov-btn${active ? " active" : ""}`, "aria-pressed": String(active),
         onclick: () => this.pickProvider(p.id),
-      }, el("span", { class: "prov-label", text: p.label || p.id }), active ? icon("check", 14) : null));
-    if (active && p.id === "chatgpt" && !(this.chatgpt && this.chatgpt.signed_in)) {
+      }, el("span", { class: "prov-label", text: shortName(p) }),
+      p.kind === "subscription" ? el("span", { class: "prov-sub", text: "Plus / Pro plan" }) : null,
+      active ? icon("check", 14) : null));
+    if (active && p.id === "chatgpt" && !(this.chatgpt && this.chatgpt.signed_in && this.chatgpt.plan_ok !== false)) {
       row.append(this.signInBox());
     }
     return row;
@@ -117,15 +142,16 @@ export class Switcher {
     try {
       const out = await api("/provider", { method: "POST", body });
       this.ctx.setStatus(out.status);
+      if (out.ok === false && body.provider !== "chatgpt") toast(`Connection test failed: ${out.message}`, "error");
       return out;
     } catch (error) { toast(error.message, "error"); return null; }
   }
 
   async pickProvider(id) {
-    if (id === this.active && this.providers) { return; }
+    if (id === this.active && this.providers) return;
     const out = await this.apply({ provider: id });
     if (!out) return;
-    toast(`Switched to ${this.providers.find((p) => p.id === id)?.label || id}`);
+    toast(`Switched to ${shortName(this.providers.find((p) => p.id === id) || { id })}`);
     await this.open();
   }
 

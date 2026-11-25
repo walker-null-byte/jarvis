@@ -98,10 +98,11 @@ export function renderActivity(container) {
   const entries = [];
   const list = el("ol", { class: "activity-list", "aria-live": "off" });
   const filter = el("select", { "aria-label": "Filter events" },
-    Object.keys(FILTERS).map((name) => el("option", { value: name, text: name })));
+    Object.keys(FILTERS).map((name) => el("option", { value: name, text: { all: "All events", tools: "Tool calls", turns: "Turns & messages", approvals: "Approvals", errors: "Errors" }[name] || name })));
+  const empty = el("p", { class: "note empty-state", text: "No activity yet. Tool calls, turns and approvals appear here as they happen." });
   const search = el("input", { type: "search", placeholder: "Filter text…", "aria-label": "Filter text" });
   const clearButton = el("button", { text: "Clear", onclick: () => { entries.length = 0; redraw(); } });
-  container.append(el("div", { class: "panel-tools" }, filter, search, clearButton), list);
+  container.append(el("div", { class: "panel-tools" }, filter, search, clearButton), empty, list);
 
   function visible(msg) {
     const needle = search.value.trim().toLowerCase();
@@ -116,10 +117,17 @@ export function renderActivity(container) {
       el("span", { class: "act-text", text: summarize(msg) }));
   }
 
+  function syncEmpty() {
+    empty.hidden = list.children.length > 0;
+    empty.textContent = entries.length ? "Nothing matches the filter." : "No activity yet. Tool calls, turns and approvals appear here as they happen.";
+  }
+
   function redraw() {
     list.replaceChildren(...entries.filter(visible).slice(-MAX_LOG).map(row));
+    syncEmpty();
     list.scrollTop = list.scrollHeight;
   }
+  syncEmpty();
   filter.addEventListener("change", redraw);
   search.addEventListener("input", redraw);
 
@@ -133,6 +141,7 @@ export function renderActivity(container) {
         while (list.children.length > MAX_LOG) list.firstChild.remove();
         list.scrollTop = list.scrollHeight;
       }
+      syncEmpty();
     },
   };
 }

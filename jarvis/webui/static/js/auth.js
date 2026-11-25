@@ -22,7 +22,11 @@ export async function startChatgptSignIn() {
         await new Promise((r) => setTimeout(r, 2000));
         let status;
         try { status = await api("/auth/chatgpt"); } catch { continue; }
-        if (status.signed_in) return status;
+        if (status.signed_in && status.plan_ok !== false) return status;
+        // Finished without usable access: surface the server's reason now.
+        if (!status.pending && (status.error || status.signed_in)) {
+          throw new Error(status.error || "Signed in, but this ChatGPT plan can't be used by Jarvis.");
+        }
       }
       throw new Error(cancelled ? "Sign-in cancelled" : "Sign-in timed out. Try again.");
     },

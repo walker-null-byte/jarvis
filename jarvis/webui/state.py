@@ -97,7 +97,8 @@ class WebState:
             action()
         except Exception as error:
             if not self._saw_error:
-                self.emit("error", message=str(error))
+                self.emit("error", message=str(error), status=getattr(error, "status", None),
+                          details=getattr(error, "details", "") or "")
         finally:
             self._running = False
             self.emit("busy_changed", busy=self.busy)

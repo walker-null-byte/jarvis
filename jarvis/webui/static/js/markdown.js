@@ -1,37 +1,53 @@
-// Safe markdown renderer. It builds DOM nodes directly (no innerHTML anywhere),
-// so untrusted model output can never inject markup.
+// Safe markdown renderer. marked (vendored, see vendor/marked.esm.js) only tokenizes;
+// every node is built here with createElement/textContent, so untrusted model output
+// can never inject markup: raw HTML in the text is shown as plain text, links are
+// limited to http(s)/mailto, and remote images are never fetched (they become links).
+import { Lexer } from "../vendor/marked.esm.js";
 import { el } from "./dom.js";
 
-const INLINE = new RegExp([
-  "`([^`\\n]+)`",                                   // 1 inline code
-  "\\*\\*([^*\\n]+?)\\*\\*",                        // 2 bold
-  "(?<![\\w*])\\*([^*\\s][^*\\n]*?)\\*(?![\\w*])",  // 3 italic
-  "\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)", // 4,5 link
-  "(https?:\\/\\/[^\\s<>()]+[^\\s<>().,;:!?'\"])",   // 6 bare url
-].join("|"), "g");
+const SAFE_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 
-function link(href, label) {
-  return el("a", { href, target: "_blank", rel: "noopener noreferrer", text: label });
+// Returns the normalized URL when it is safe to link to, otherwise "".
+function safeHref(href) {
+  try {
+    const url = new URL(String(href || "").trim());
+    return SAFE_PROTOCOLS.has(url.protocol) ? url.href : "";
+  } catch { return ""; }
 }
 
-export function renderInline(text, parent) {
-  let last = 0;
-  const pattern = new RegExp(INLINE.source, "g"); // own lastIndex: renderInline recurses
-  for (let m = pattern.exec(text); m; m = pattern.exec(text)) {
-    if (m.index > last) parent.append(text.slice(last, m.index));
-    if (m[1] !== undefined) parent.append(el("code", { text: m[1] }));
-    else if (m[2] !== undefined) parent.append(renderInline(m[2], el("strong")));
-    else if (m[3] !== undefined) parent.append(renderInline(m[3], el("em")));
-    else if (m[4] !== undefined) parent.append(link(m[5], m[4]));
-    else parent.append(link(m[6], m[6]));
-    last = pattern.lastIndex;
+function link(href, title) {
+  const safe = safeHref(href);
+  if (!safe) return el("span", { class: "dead-link", title: "Blocked unsafe link" });
+  return el("a", { href: safe, target: "_blank", rel: "noopener noreferrer nofollow", title });
+}
+
+function checkbox(checked) {
+  return el("input", { type: "checkbox", disabled: true, checked, "aria-label": checked ? "done" : "not done" });
+}
+
+function inline(tokens, parent) {
+  for (const t of tokens || []) {
+    switch (t.type) {
+      case "text": case "escape":
+        if (t.tokens && t.tokens.length) inline(t.tokens, parent);
+        else parent.append(t.text);
+        break;
+      case "strong": parent.append(inline(t.tokens, el("strong"))); break;
+      case "em": parent.append(inline(t.tokens, el("em"))); break;
+      case "del": parent.append(inline(t.tokens, el("del"))); break;
+      case "checkbox": parent.append(checkbox(t.checked)); break;
+      case "codespan": parent.append(el("code", { text: t.text })); break;
+      case "br": parent.append(el("br")); break;
+      case "link": parent.append(inline(t.tokens, link(t.href, t.title))); break;
+      case "image": { const a = link(t.href, t.title); a.append(t.text || t.href); parent.append(a); break; }
+      default: parent.append(t.raw ?? t.text ?? ""); // inline html and anything unknown: as text
+    }
   }
-  if (last < text.length) parent.append(text.slice(last));
   return parent;
 }
 
 function codeBlock(lang, code) {
-  const copy = el("button", { class: "copy-btn", text: "Copy", "aria-label": "Copy code" });
+  const copy = el("button", { class: "copy-btn", type: "button", text: "Copy", "aria-label": "Copy code" });
   copy.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(code); copy.textContent = "Copied"; }
     catch { copy.textContent = "Failed"; }
@@ -42,76 +58,59 @@ function codeBlock(lang, code) {
     el("pre", {}, el("code", { text: code })));
 }
 
-const FENCE = /^\s*```\s*([\w+-]*)\s*$/;
-const HEADING = /^(#{1,6})\s+(.*)$/;
-const LIST = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
-const RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
-const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
-
-function splitRow(line) {
-  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
-}
-
-function table(lines) {
-  const head = splitRow(lines[0]);
-  const rows = lines.slice(2).map(splitRow);
-  const cell = (tag, text) => el(tag, {}, renderInline(text, el("span")));
+function tableNode(t) {
+  const cell = (tag, c, align) => {
+    const node = inline(c.tokens, el(tag));
+    if (align) node.style.textAlign = align; // CSSOM is allowed by the CSP, style attributes are not
+    return node;
+  };
+  const aligns = t.align || [];
   return el("div", { class: "table-wrap" }, el("table", {},
-    el("thead", {}, el("tr", {}, head.map((c) => cell("th", c)))),
-    el("tbody", {}, rows.map((r) => el("tr", {}, head.map((_, i) => cell("td", r[i] || "")))))));
+    el("thead", {}, el("tr", {}, t.header.map((c, i) => cell("th", c, aligns[i])))),
+    el("tbody", {}, t.rows.map((row) => el("tr", {}, row.map((c, i) => cell("td", c, aligns[i])))))));
 }
 
-function startsBlock(line, next) {
-  return FENCE.test(line) || HEADING.test(line) || LIST.test(line) || RULE.test(line)
-    || /^\s*>/.test(line) || (line.includes("|") && next !== undefined && TABLE_SEP.test(next));
+function listNode(t) {
+  const list = el(t.ordered ? "ol" : "ul");
+  if (t.ordered && typeof t.start === "number" && t.start !== 1) list.setAttribute("start", String(t.start));
+  let tasks = false;
+  for (const item of t.items) {
+    const li = el("li");
+    if (item.task) { tasks = true; li.className = "task"; }
+    blocks(item.tokens, li, item.task || !item.loose);
+    list.append(li);
+  }
+  if (tasks) list.className = "task-list";
+  return list;
+}
+
+function blocks(tokens, parent, tight = false) {
+  for (const t of tokens || []) {
+    switch (t.type) {
+      case "space": case "def": break;
+      case "checkbox": parent.append(checkbox(t.checked)); break;
+      case "heading": parent.append(inline(t.tokens, el(`h${Math.min(t.depth + 1, 6)}`))); break;
+      case "paragraph": parent.append(tight ? inline(t.tokens, el("span", { class: "tight" })) : inline(t.tokens, el("p"))); break;
+      case "text": // loose text inside a tight list item, or a stray block-level text
+        if (t.tokens && t.tokens.length) inline(t.tokens, parent); else parent.append(t.text);
+        break;
+      case "code": parent.append(codeBlock((t.lang || "").trim().split(/\s+/)[0], t.text)); break;
+      case "blockquote": parent.append(blocks(t.tokens, el("blockquote"))); break;
+      case "list": parent.append(listNode(t)); break;
+      case "table": parent.append(tableNode(t)); break;
+      case "hr": parent.append(el("hr")); break;
+      case "html": parent.append(el("p", { text: (t.raw || t.text || "").trim() })); break; // shown, never parsed
+      default: if (t.raw) parent.append(el("p", { text: t.raw.trim() }));
+    }
+  }
+  return parent;
 }
 
 export function renderMarkdown(source) {
   const root = el("div", { class: "md" });
-  const lines = String(source ?? "").replace(/\r\n?/g, "\n").split("\n");
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    let m;
-    if (!line.trim()) { i++; continue; }
-    if ((m = FENCE.exec(line))) {
-      const body = [];
-      for (i++; i < lines.length && !FENCE.test(lines[i]); i++) body.push(lines[i]);
-      i++; // closing fence (may be absent while streaming)
-      root.append(codeBlock(m[1], body.join("\n")));
-    } else if ((m = HEADING.exec(line))) {
-      const level = Math.min(m[1].length + 1, 6);
-      root.append(renderInline(m[2], el(`h${level}`)));
-      i++;
-    } else if (RULE.test(line)) {
-      root.append(el("hr")); i++;
-    } else if (/^\s*>/.test(line)) {
-      const quote = [];
-      for (; i < lines.length && /^\s*>/.test(lines[i]); i++) quote.push(lines[i].replace(/^\s*>\s?/, ""));
-      root.append(el("blockquote", {}, renderMarkdown(quote.join("\n"))));
-    } else if (line.includes("|") && TABLE_SEP.test(lines[i + 1] || "")) {
-      const rows = [];
-      for (; i < lines.length && lines[i].includes("|"); i++) rows.push(lines[i]);
-      root.append(table(rows));
-    } else if ((m = LIST.exec(line))) {
-      const ordered = /\d/.test(m[2]);
-      const list = el(ordered ? "ol" : "ul");
-      for (; i < lines.length && (m = LIST.exec(lines[i])); i++) {
-        const depth = Math.min(Math.floor(m[1].replace(/\t/g, "  ").length / 2), 4);
-        const item = renderInline(m[3], el("li"));
-        if (depth) item.style.marginLeft = `${depth * 1.2}rem`; // CSSOM is allowed by the CSP, attributes are not
-        list.append(item);
-      }
-      root.append(list);
-    } else {
-      const para = [];
-      for (; i < lines.length && lines[i].trim() && (para.length === 0 || !startsBlock(lines[i], lines[i + 1])); i++) {
-        para.push(lines[i]);
-      }
-      const p = el("p");
-      para.forEach((text, index) => { if (index) p.append(el("br")); renderInline(text, p); });
-      root.append(p);
-    }
-  }
-  return root;
+  const text = String(source ?? "").replace(/\r\n?/g, "\n");
+  let tokens;
+  try { tokens = new Lexer({ gfm: true, breaks: true }).lex(text); }
+  catch { return el("div", { class: "md" }, el("p", { text })); }
+  return blocks(tokens, root);
 }

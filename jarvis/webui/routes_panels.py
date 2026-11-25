@@ -354,6 +354,11 @@ def _presets():
     return PROVIDER_PRESETS
 
 
+def _env_is_set(name):
+    import os
+    return bool(name) and bool(os.environ.get(name))
+
+
 @router.get("/providers")
 def list_providers(state: WebState = Depends(web)):
     active = state.jarvis.config["llm"].get("provider", "custom")
@@ -363,14 +368,26 @@ def list_providers(state: WebState = Depends(web)):
                   "active": name == active,
                   "base_url": preset.get("base_url", ""),
                   "api_key_env": preset.get("api_key_env", ""),
+                  "env_set": _env_is_set(preset.get("api_key_env", "")),
                   "description": preset.get("description", ""),
+                  "default_model": preset.get("default_model", ""),
                   "backend": preset.get("backend", "chat")}
                  for name, preset in ordered]
     providers.append({"id": "custom", "label": "Custom — any OpenAI-compatible endpoint",
                       "kind": "api_key", "active": active == "custom", "base_url": "",
-                      "api_key_env": "", "backend": "chat",
+                      "api_key_env": "", "env_set": False, "default_model": "", "backend": "chat",
                       "description": "Any reachable OpenAI-compatible endpoint"})
-    return {"providers": providers, "active": active}
+    llm = state.jarvis.config["llm"]
+    # Booleans only: the key itself never leaves the server.
+    return {"providers": providers, "active": active,
+            "session_key": bool(llm.get("api_key")),
+            "active_key_env": llm.get("api_key_env") or "",
+            "active_key_env_set": _env_is_set(llm.get("api_key_env") or "")}
+
+
+def _redact(text, secret):
+    """Never echo a typed key back to the browser, even inside a server error."""
+    return text.replace(secret, "***") if secret and len(secret) >= 4 else text
 
 
 @router.post("/provider")
@@ -378,34 +395,51 @@ def set_provider(body: ProviderBody, state: WebState = Depends(web)):
     if state.busy:
         fail(409, "Finish or cancel the running turn first")
     provider = body.provider.strip().lower()
+    typed = body.api_key_env.strip()
+    from ..commands import _split_credentials
+    secret = _split_credentials(typed)[1]  # only a literal key is secret; env var names are fine to show
     if provider in _presets():
         outputs = [_command(state, "/provider", "use", provider)]
-        if body.api_key_env.strip():
-            outputs.append(_apply_preset_credential(state, body.api_key_env.strip()))
+        if typed:
+            outputs.append(_apply_preset_credential(state, typed))
     elif provider == "custom":
         if not body.base_url.strip():
             fail(400, "A custom provider needs a base URL")
-        extra = [body.api_key_env.strip()] if body.api_key_env.strip() else []
+        extra = [typed] if typed else []
         outputs = [_command(state, "/provider", "set", body.base_url.strip(), *extra)]
     else:
         fail(400, f"Unknown provider: {provider}")
     if body.model.strip():
         outputs.append(_command(state, "/model", body.model.strip()))
-    return {"output": "\n".join(outputs), "status": state.status()}
+    # The command layer tests before a typed key is applied; report one test of
+    # the final configuration instead of a misleading "failed" then "ok".
+    lines = [line for line in "\n".join(outputs).splitlines()
+             if not line.startswith("Connection test:")]
+    ok, message = _final_check(state)
+    lines.append(f"Connection test: {'OK' if ok else 'failed'} — {message}")
+    return {"output": _redact("\n".join(lines), secret), "ok": ok,
+            "message": _redact(message, secret), "status": state.status()}
 
 
 @router.post("/provider/test")
 def test_provider(body: TestBody, state: WebState = Depends(web)):
-    from ..commands import _test_connection
-    presets = _presets()
-    base_url, key_env = body.base_url.strip() or None, body.api_key_env.strip() or None
-    preset = presets.get(body.provider.strip().lower())
-    if preset and not base_url:
-        base_url, key_env = preset["base_url"], key_env or preset["api_key_env"]
+    """Probe the provider shown in the UI (not necessarily the active one)."""
+    from ..commands import _split_credentials, _test_connection
+    name = body.provider.strip().lower()
+    typed = body.api_key_env.strip()
+    preset = _presets().get(name)
+    base_url, key_env, key = body.base_url.strip() or None, None, None
+    if typed:
+        key_env, key = _split_credentials(typed)
+    if preset:
+        base_url = preset["base_url"]
+        key_env = key_env or (None if key else preset["api_key_env"] or None)
+        if name == state.jarvis.config["llm"].get("provider") and not typed:
+            base_url, key_env = None, None  # the active provider: probe the live client
     ok, message, models, working_url = _test_connection(
-        state.jarvis, base_url=base_url, api_key_env=key_env, check_model=False,
-        provider=body.provider.strip().lower() or None)
-    return {"ok": ok, "message": message, "models": models, "base_url": working_url}
+        state.jarvis, base_url=base_url, api_key_env=key_env, api_key=key,
+        check_model=False, provider=name or None)
+    return {"ok": ok, "message": _redact(message, key), "models": _chat_models(models), "base_url": working_url}
 
 
 def _apply_preset_credential(state, raw):
@@ -414,7 +448,7 @@ def _apply_preset_credential(state, raw):
     An env var name is persisted like any provider setting; a literal key stays
     in memory for this run only and is never written to disk.
     """
-    from ..commands import _split_credentials, _test_connection
+    from ..commands import _split_credentials
     from ..config import save_runtime_overrides
     llm = state.jarvis.config["llm"]
     env_name, literal = _split_credentials(raw)
@@ -425,9 +459,27 @@ def _apply_preset_credential(state, raw):
         llm["api_key"] = literal
     state.jarvis.llm.reconfigure(state.jarvis.config)
     state.jarvis._emit("config_changed", section="llm", key="api_key")
-    ok, message, _, _ = _test_connection(state.jarvis, check_model=False)
     source = f"env var {env_name}" if env_name else "a key for this session only"
-    return f"Credentials: using {source}. Connection test: {'ok' if ok else 'failed — ' + message}"
+    return f"Credentials: using {source}."
+
+
+def _final_check(state):
+    """One connection test of the provider as finally configured: (ok, message)."""
+    from ..commands import _test_connection
+    if state.jarvis.config["llm"].get("provider") == "chatgpt":
+        status = state.chatgpt_status()
+        ok = bool(status.get("signed_in") and status.get("plan_ok", True))
+        return ok, "Signed in" if ok else (status.get("error") or "Not signed in to ChatGPT")
+    try:
+        ok, message, _, _ = _test_connection(state.jarvis, check_model=False)
+    except Exception as error:  # server down, bad key: report, don't 500
+        ok, message = False, str(error)
+    return ok, message
+
+
+def _chat_models(ids):
+    """Drop embedding-only models: they are listed by local servers but cannot chat."""
+    return [m for m in (ids or []) if "embed" not in str(m).lower()]
 
 
 @router.get("/models")
@@ -437,7 +489,7 @@ def list_models(state: WebState = Depends(web)):
         ok, message, models, _ = _test_connection(state.jarvis, check_model=False)
     except Exception as error:  # e.g. server down, not signed in: not a server fault
         ok, message, models = False, str(error), []
-    return {"ok": ok, "message": message, "models": models,
+    return {"ok": ok, "message": message, "models": _chat_models(models),
             "current": state.jarvis.config["llm"].get("model", "")}
 
 

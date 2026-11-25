@@ -153,6 +153,8 @@ function setBusy(value) {
   if (!value) toolsRunning = 0;
   $("stop").hidden = !value;
   $("send").hidden = value;
+  $("stop").disabled = false;
+  $("stop").title = "Stop (Esc)";
   chat.syncActions();
   updateOrb();
 }
@@ -205,6 +207,7 @@ function showBanner(text) {
 // ---------- snapshot ----------
 
 let tourShown = false;
+let joinedMidTurn = false;
 
 async function applySnapshot(snap) {
   voice.stop();
@@ -215,6 +218,7 @@ async function applySnapshot(snap) {
   chat.load(snap.history, snap.approvals || []);
   chat.assignIndexes(snap.history);
   setBusy(!!snap.busy);
+  joinedMidTurn = !!snap.busy; // what streamed before we connected is only in the saved history
   if (snap.busy) chat.beginTurn();
   updateHeader();
   renderAutoSpeak();
@@ -256,7 +260,7 @@ function onMessage(msg) {
     case "turn_started": setBusy(true); break;
     case "tool_started": toolsRunning++; updateOrb(); break;
     case "tool_finished": toolsRunning = Math.max(0, toolsRunning - 1); updateOrb(); break;
-    case "user_message": ctx.hasUserMessage = true; voice.stop(); break;
+    case "user_message": ctx.hasUserMessage = true; voice.stop(); refreshStatus(); sessions.refresh(); break; // the title is set by the first message
     case "busy_changed": setBusy(!!d.busy); if (!d.busy) chat.endTurn(); break;
     case "voice_download": handleDownloadEvent(d); break;
     case "voice_listening": voiceState.listening = !!d.active; updateOrb(); break;
@@ -266,6 +270,7 @@ function onMessage(msg) {
   chat.handle(msg);
   if (msg.kind === "turn_finished") {
     chat.endTurn();
+    if (joinedMidTurn) { joinedMidTurn = false; ctx.reloadSnapshot().catch(handleApiError); }
     updateOrb();
     refreshIndexes();
     sessions.refresh();
@@ -447,7 +452,10 @@ $("stop").addEventListener("click", cancelTurn);
 
 async function cancelTurn() {
   voice.stop();
-  try { await api("/cancel", { method: "POST" }); } catch (error) { toast(error.message, "error"); }
+  $("stop").disabled = true; // Stopping… until the turn actually ends
+  $("stop").title = "Stopping…";
+  try { await api("/cancel", { method: "POST" }); }
+  catch (error) { $("stop").disabled = false; toast(error.message, "error"); }
 }
 
 async function newChat() {

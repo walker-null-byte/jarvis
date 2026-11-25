@@ -414,3 +414,36 @@ def test_logout_revokes_and_keeps_client_id(auth):
     after = auth._load()
     assert "tokens" not in after and after["client_id"] == "oaiapp_one"
     assert not auth.status()["signed_in"]
+
+
+def test_callback_page_reports_failure_instead_of_success(auth, monkeypatch):
+    """The browser tab must not say "Signed in" when the sign-in failed."""
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(auth_mod, "REDIRECT_PORT", port)
+    auth.start_login(open_browser=False)
+    state = auth._attempt["state"]
+    page = httpx.get(
+        f"http://127.0.0.1:{port}{auth_mod.REDIRECT_PATH}",
+        params={"state": state, "error": "unsupported_plan", "error_description": "not eligible"},
+        timeout=10,
+    ).text
+    assert "Sign-in failed" in page and "Signed in" not in page
+    assert "unsupported_plan" in page and "not eligible" in page
+    st = auth.wait(timeout=10)
+    assert not st["signed_in"] and not st["pending"] and "unsupported_plan" in st["error"]
+
+
+def test_gemini_models_prefix_is_stripped():
+    from types import SimpleNamespace
+    from jarvis.providers.openai_chat import ChatBackend
+    config = {"base_url": "http://x/v1", "model": "models/gemini-2.5-flash", "stream": False,
+              "max_tokens": 10, "api_key": "k"}
+    backend = ChatBackend(config)
+    assert backend.model == "gemini-2.5-flash"
+    backend.client = SimpleNamespace(models=SimpleNamespace(list=lambda timeout: SimpleNamespace(
+        data=[SimpleNamespace(id="models/gemini-2.5-pro"), SimpleNamespace(id="models/gemini-2.5-flash")])))
+    assert backend.list_models() == ["gemini-2.5-flash", "gemini-2.5-pro"]

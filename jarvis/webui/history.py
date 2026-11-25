@@ -35,6 +35,10 @@ def _tool_item(call, index):
 def render_history(messages, artifact_lookup=None):
     """Return a list of display items: user, assistant, tool, artifact, summary.
 
+    An assistant item may carry `reasoning` (the saved thinking text) and `stats`
+    (tokens, speed, timings) next to its `content`; either can exist without text
+    when the model went straight to a tool call.
+
     user/assistant/tool items carry `index`, their position in `messages`
     (a tool item uses the index of the assistant message that made the call).
     """
@@ -56,8 +60,15 @@ def render_history(messages, artifact_lookup=None):
                 after_summary = False
                 continue
             after_summary = False
-            if content.strip():
-                items.append({"type": "assistant", "content": content, "index": index})
+            reasoning = (message.get("reasoning") or "").strip()
+            stats = message.get("stats") if isinstance(message.get("stats"), dict) else None
+            if content.strip() or reasoning or stats:
+                item = {"type": "assistant", "content": content, "index": index}
+                if reasoning:
+                    item["reasoning"] = reasoning
+                if stats:
+                    item["stats"] = stats
+                items.append(item)
             for call in message.get("tool_calls") or []:
                 item = _tool_item(call, index)
                 pending[item["id"]] = item

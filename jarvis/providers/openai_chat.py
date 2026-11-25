@@ -1,13 +1,95 @@
 """OpenAI-compatible Chat Completions backend (LM Studio, Ollama, vLLM, ...)."""
 
 import os
+import re
 
 from openai import OpenAI
+
+from .thinking import ThinkSplitter, split_all
 
 
 def resolve_key(llm):
     """Literal keys (session-local, never persisted) win over env vars."""
     return llm.get("api_key") or os.environ.get(llm.get("api_key_env") or "") or "not-needed"
+
+
+def _bare_id(model_id):
+    """Gemini lists ids as "models/gemini-..."; the chat call wants the bare id."""
+    return model_id.removeprefix("models/") if isinstance(model_id, str) else model_id
+
+
+# Gemini 3+ requires a thought signature on function calls it did not produce itself.
+# Documented dummy values (ai.google.dev "Thought signatures" FAQ 1).
+GEMINI_DUMMY_SIGNATURE = "skip_thought_signature_validator"
+
+_MESSAGE_KEYS = ("role", "content", "name", "tool_call_id", "tool_calls")
+_OPTIONAL_HINTS = {
+    "stream_options": re.compile(r"stream_options|include_usage|stream option", re.I),
+    "extra_body": re.compile(r"thinking|include_thoughts|extra_body|\bgoogle\b", re.I),
+}
+_VAGUE_REJECTION = re.compile(
+    r"additional propert|unrecogni[sz]ed|unknown (field|parameter|argument|name)|"
+    r"unsupported parameter|extra inputs|not permitted|unexpected (field|keyword)", re.I)
+
+
+def is_gemini(base_url):
+    return "generativelanguage.googleapis.com" in str(base_url or "")
+
+
+def _extra_of(obj, key="extra_content"):
+    """An undeclared field on an SDK object (kept by pydantic as an extra) or dict."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    value = getattr(obj, key, None)
+    if value is None:
+        extras = getattr(obj, "model_extra", None)
+        if isinstance(extras, dict):
+            value = extras.get(key)
+    if value is not None and hasattr(value, "model_dump"):
+        value = value.model_dump()
+    return value if isinstance(value, dict) else None
+
+
+def _usage_of(usage):
+    """{"input": n, "output": n} from an SDK usage object, or None."""
+    if usage is None:
+        return None
+    out = getattr(usage, "completion_tokens", None)
+    if not isinstance(out, int):
+        return None
+    inp = getattr(usage, "prompt_tokens", None)
+    return {"input": inp if isinstance(inp, int) else None, "output": out}
+
+
+def clean_messages(messages, gemini=False):
+    """Messages as the Chat Completions API wants them.
+
+    Jarvis keeps extra keys on history messages (reasoning, stats, provider
+    state); strict servers reject unknown fields, so only the standard ones go
+    out. Gemini's thought-signature ``extra_content`` on tool calls is kept
+    (and filled with the documented dummy when missing); other servers never see it.
+    """
+    out = []
+    for msg in messages:
+        clean = {k: msg[k] for k in _MESSAGE_KEYS if k in msg and msg[k] is not None}
+        calls = msg.get("tool_calls")
+        if calls:
+            cleaned = []
+            for call in calls:
+                item = {k: call[k] for k in ("id", "type", "function") if k in call}
+                extra = call.get("extra_content")
+                if gemini and extra:
+                    item["extra_content"] = extra
+                cleaned.append(item)
+            if gemini and not any(c.get("extra_content") for c in cleaned):
+                # History from another provider (or an old session): the first call of a
+                # step must carry a signature, so give it the documented dummy.
+                cleaned[0]["extra_content"] = {"google": {"thought_signature": GEMINI_DUMMY_SIGNATURE}}
+            clean["tool_calls"] = cleaned
+        out.append(clean)
+    return out
 
 
 class ChatBackend:
@@ -17,9 +99,11 @@ class ChatBackend:
 
     def __init__(self, llm):
         self.base_url = llm["base_url"]
-        self.model = llm["model"]
+        self.model = _bare_id(llm["model"])
         self.stream = llm["stream"]
         self.max_tokens = llm["max_tokens"]
+        self.gemini = is_gemini(self.base_url)
+        self.dropped = set()  # optional request fields this server rejected
         self.client = OpenAI(
             base_url=llm["base_url"],
             api_key=resolve_key(llm),
@@ -30,7 +114,7 @@ class ChatBackend:
     def list_models(self, timeout=5.0):
         """Sorted model ids the endpoint exposes (raises on failure)."""
         page = self.client.models.list(timeout=timeout)
-        return sorted(model.id for model in page.data)
+        return sorted(_bare_id(model.id) for model in page.data)
 
     def check_model(self, ids, timeout=5.0):
         """Send a 1-token request so a bad model/key fails now, not mid-turn."""
@@ -42,31 +126,73 @@ class ChatBackend:
             timeout=timeout,
         )
 
-    def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
-        kwargs = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens}
+    def _request(self, messages, tools):
+        kwargs = {"model": self.model, "messages": clean_messages(messages, self.gemini),
+                  "max_tokens": self.max_tokens}
         if tools:
             kwargs["tools"] = tools
+        if self.stream and "stream_options" not in self.dropped:
+            kwargs["stream_options"] = {"include_usage": True}
+        if self.gemini and "extra_body" not in self.dropped:
+            # Thought summaries; they come back inline as <thought>...</thought>.
+            kwargs["extra_body"] = {"extra_body": {"google": {"thinking_config": {"include_thoughts": True}}}}
+        return kwargs
+
+    def _create(self, kwargs, **extra):
+        """create(), retrying once without optional fields the server rejects.
+
+        Some OpenAI-compatible servers refuse ``stream_options`` (or Gemini's
+        thinking config) with a 400/422. Which ones is remembered for the
+        lifetime of this client so only the first request pays for the retry.
+        """
+        try:
+            return self.client.chat.completions.create(**kwargs, **extra)
+        except Exception as error:
+            if getattr(error, "status_code", None) not in (400, 422):
+                raise
+            text = f"{error} {getattr(error, 'body', '')}"
+            present = [k for k in _OPTIONAL_HINTS if k in kwargs]
+            named = [k for k in present if _OPTIONAL_HINTS[k].search(text)]
+            if not named and present and _VAGUE_REJECTION.search(text):
+                named = present
+            if not named:
+                raise
+            self.dropped.update(named)
+            retry = {k: v for k, v in kwargs.items() if k not in named}
+            return self.client.chat.completions.create(**retry, **extra)
+
+    def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
+        kwargs = self._request(messages, tools)
         if not self.stream:
             return self._blocking(kwargs, on_text, on_reasoning)
         return self._streaming(kwargs, on_text, on_reasoning)
 
     def _blocking(self, kwargs, on_text, on_reasoning):
-        choice = self.client.chat.completions.create(**kwargs).choices[0].message
-        msg = {"role": "assistant", "content": choice.content or ""}
-        reasoning = _reasoning_of(choice)
+        response = self._create(kwargs)
+        choice = response.choices[0].message
+        inline, content = split_all(choice.content or "")
+        reasoning = (_reasoning_of(choice) + inline).strip()
+        msg = {"role": "assistant", "content": content}
         if reasoning:
             msg["reasoning"] = reasoning
             if on_reasoning:
                 on_reasoning(reasoning)
         if choice.tool_calls:
-            msg["tool_calls"] = [
-                {
+            calls = []
+            for i, tc in enumerate(choice.tool_calls):
+                call = {
                     "id": tc.id or f"call_{i}",
                     "type": "function",
                     "function": {"name": tc.function.name, "arguments": tc.function.arguments or ""},
                 }
-                for i, tc in enumerate(choice.tool_calls)
-            ]
+                extra = _extra_of(tc)
+                if extra:
+                    call["extra_content"] = extra
+                calls.append(call)
+            msg["tool_calls"] = calls
+        usage = _usage_of(getattr(response, "usage", None))
+        if usage:
+            msg["usage"] = usage
         if on_text and msg["content"]:
             on_text(msg["content"])
         return msg
@@ -75,8 +201,23 @@ class ChatBackend:
         text_parts = []
         reasoning_parts = []
         tool_calls = {}  # index -> accumulating call dict
+        usage = None
+        splitter = ThinkSplitter()
+
+        def emit(pieces):
+            for kind, piece in pieces:
+                if kind == "reasoning":
+                    reasoning_parts.append(piece)
+                    if on_reasoning:
+                        on_reasoning(piece)
+                else:
+                    text_parts.append(piece)
+                    if on_text:
+                        on_text(piece)
+
         try:
-            for chunk in self.client.chat.completions.create(stream=True, **kwargs):
+            for chunk in self._create(kwargs, stream=True):
+                usage = _usage_of(getattr(chunk, "usage", None)) or usage
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -84,13 +225,9 @@ class ChatBackend:
                     continue
                 reasoning = _reasoning_of(delta)
                 if reasoning:
-                    reasoning_parts.append(reasoning)
-                    if on_reasoning:
-                        on_reasoning(reasoning)
+                    emit([("reasoning", reasoning)])
                 if delta.content:
-                    text_parts.append(delta.content)
-                    if on_text:
-                        on_text(delta.content)
+                    emit(splitter.feed(delta.content))
                 for tc in delta.tool_calls or []:
                     idx = tc.index if tc.index is not None else len(tool_calls)
                     slot = tool_calls.setdefault(idx, {
@@ -99,27 +236,34 @@ class ChatBackend:
                     })
                     if tc.id:
                         slot["id"] = tc.id
+                    extra = _extra_of(tc)
+                    if extra:  # Gemini thought signature: keep it verbatim
+                        slot["extra_content"] = extra
                     if tc.function:
                         if tc.function.name:
                             slot["function"]["name"] += tc.function.name
                         if tc.function.arguments:
                             slot["function"]["arguments"] += tc.function.arguments
+            emit(splitter.finish())
         except Exception as error:
             try:
-                error._jarvis_partial = bool(text_parts or tool_calls)  # type: ignore[attr-defined]
+                error._jarvis_partial = bool(text_parts or reasoning_parts or tool_calls)  # type: ignore[attr-defined]
             except Exception:
                 pass
             raise
 
         msg = {"role": "assistant", "content": "".join(text_parts)}
-        if reasoning_parts:
-            msg["reasoning"] = "".join(reasoning_parts)
+        reasoning = "".join(reasoning_parts).strip()
+        if reasoning:
+            msg["reasoning"] = reasoning
         if tool_calls:
             # Some local servers omit tool-call IDs; synthesize them.
             for i in sorted(tool_calls):
                 if not tool_calls[i]["id"]:
                     tool_calls[i]["id"] = f"call_{i}"
             msg["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+        if usage:
+            msg["usage"] = usage
         return msg
 
 

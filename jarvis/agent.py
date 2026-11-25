@@ -12,7 +12,7 @@ from .characters import CharacterStore
 from .config import load_config
 from .context import build_system_prompt, ensure_mind
 from .events import Event, EventBus, new_id
-from .llm import LLM
+from .llm import LLM, Cancelled
 from .memory import EpisodeLog
 from .redaction import redact_text, redact_value
 from .registry import get_registry
@@ -105,17 +105,23 @@ class Jarvis:
         except Exception as e:
             # Summarization is best-effort; never abort the user turn.
             self._emit("error", message=f"Summarization failed: {e}")
-        turn_id = self._begin_turn(user_text)
-        self.episodes.log("user", user_text)
         user_message = {"role": "user", "content": user_text}
-        self.history.append(user_message)
-        self.sessions.append(self.session_id, user_message)
-        self._emit("user_message", turn_id=turn_id, content=user_text)
+
+        def record_user_message():
+            # Announced before turn_started so the browser shows your message first.
+            self.episodes.log("user", user_text)
+            self.history.append(user_message)
+            self.sessions.append(self.session_id, user_message)
+            self._emit("user_message", turn_id=self._active_turn, content=user_text)
+
+        turn_id = self._begin_turn(user_text, before=record_user_message)
         return self._run_turn(turn_id, on_text, on_tool, on_tool_result, on_reasoning)
 
-    def _begin_turn(self, user_text):
+    def _begin_turn(self, user_text, before=None):
         turn_id = new_id("turn")
         self._active_turn = turn_id
+        if before:
+            before()
         self._emit("turn_started", turn_id=turn_id)
         self.audit.log("turn", self.session_id, turn_id, "turn_started", "running", {"content": user_text})
         return turn_id
@@ -126,10 +132,23 @@ class Jarvis:
         self.exposure.refresh()
         tools = self.exposure.tools()
         system_prompt = self._build_prompt()
+        partial = {"text": [], "reasoning": []}  # what the current model call streamed so far
+
         def emit_reasoning(token):
+            if self._cancel_event.is_set():
+                raise Cancelled()  # Stop takes effect mid-stream, not at the next round
+            partial["reasoning"].append(token)
             self._emit("assistant_reasoning_delta", turn_id=turn_id, content=token)
             if on_reasoning:
                 on_reasoning(token)
+
+        def emit_text(token):
+            if self._cancel_event.is_set():
+                raise Cancelled()
+            partial["text"].append(token)
+            self._emit("assistant_delta", turn_id=turn_id, content=token)
+            if on_text:
+                on_text(token)
 
         try:
             for _ in range(self.config["agent"]["max_tool_rounds"]):
@@ -137,14 +156,15 @@ class Jarvis:
                     return self._finish_cancelled(turn_id)
                 messages = [{"role": "system", "content": system_prompt}]
                 messages += self.history
-                def emit_text(token):
-                    self._emit("assistant_delta", turn_id=turn_id, content=token)
-                    if on_text:
-                        on_text(token)
-
-                msg = self._chat_turn(messages, turn_id, tools=tools, on_text=emit_text, on_reasoning=emit_reasoning)
-                self.history.append(msg)
-                self.sessions.append(self.session_id, msg)
+                partial["text"].clear()
+                partial["reasoning"].clear()
+                try:
+                    msg = self._chat_turn(messages, turn_id, tools=tools, on_text=emit_text,
+                                          on_reasoning=emit_reasoning)
+                except Cancelled:
+                    return self._finish_cancelled(turn_id, "".join(partial["text"]),
+                                                  "".join(partial["reasoning"]))
+                self._record_assistant(msg, turn_id)
 
                 calls = msg.get("tool_calls")
                 if not calls:
@@ -170,19 +190,20 @@ class Jarvis:
                 "role": "user",
                 "content": "(Tool budget for this turn is exhausted — summarize where things stand.)",
             })
-            def emit_wrapup(token):
-                self._emit("assistant_delta", turn_id=turn_id, content=token)
-                if on_text:
-                    on_text(token)
-
             # Same tools array as every other round: some APIs reject a history
             # containing tool calls when no tools are declared, and changing it
             # would break prompt caching. Calls made here are dropped unanswered.
-            msg = self._chat_turn(messages, turn_id, tools=tools, on_text=emit_wrapup, on_reasoning=emit_reasoning)
+            partial["text"].clear()
+            partial["reasoning"].clear()
+            try:
+                msg = self._chat_turn(messages, turn_id, tools=tools, on_text=emit_text,
+                                      on_reasoning=emit_reasoning)
+            except Cancelled:
+                return self._finish_cancelled(turn_id, "".join(partial["text"]),
+                                              "".join(partial["reasoning"]))
             msg.pop("tool_calls", None)
             msg.pop("provider_state", None)
-            self.history.append(msg)
-            self.sessions.append(self.session_id, msg)
+            self._record_assistant(msg, turn_id)
             reply = msg.get("content") or ""
             self.episodes.log("jarvis", reply)
             self._emit("assistant_message", turn_id=turn_id, content=reply)
@@ -193,6 +214,13 @@ class Jarvis:
         except Exception:
             self._active_turn = ""
             raise
+
+    def _record_assistant(self, msg, turn_id):
+        """Append a model reply to history/session and announce its speed stats."""
+        self.history.append(msg)
+        self.sessions.append(self.session_id, msg)
+        if msg.get("stats"):
+            self._emit("assistant_stats", turn_id=turn_id, stats=msg["stats"])
 
     # ---------- history editing ----------
 
@@ -359,14 +387,17 @@ class Jarvis:
     def _chat_turn(self, messages, turn_id, tools=None, on_text=None, on_reasoning=None):
         try:
             return self.llm.chat(messages, tools=tools, on_text=on_text, on_reasoning=on_reasoning)
+        except Cancelled:
+            raise
         except Exception as e:
-            self._emit("error", turn_id=turn_id, message=str(e))
+            self._emit("error", turn_id=turn_id, message=str(e), status=getattr(e, "status", None),
+                       details=getattr(e, "details", "") or "", provider=getattr(e, "provider", ""))
             self._emit("turn_finished", turn_id=turn_id, status="error")
             self.audit.log("llm", self.session_id, turn_id, "chat", "error", {"error": str(e)})
             self._active_turn = ""
             raise
 
-    def _finish_cancelled(self, turn_id):
+    def _finish_cancelled(self, turn_id, partial_text="", partial_reasoning=""):
         # If last assistant message had tool_calls without matching tool results, inject cancellations
         if self.history and self.history[-1].get("tool_calls"):
             pending = self.history[-1].get("tool_calls") or []
@@ -376,8 +407,11 @@ class Jarvis:
                 tool_msg = {"role": "tool", "tool_call_id": call["id"], "content": "Cancelled."}
                 self.history.append(tool_msg)
                 self.sessions.append(self.session_id, tool_msg)
-        reply = "Cancelled."
+        # Keep what was already streamed instead of replacing it with a bare "Cancelled."
+        reply = partial_text.strip() or "Cancelled."
         message = {"role": "assistant", "content": reply}
+        if partial_reasoning.strip():
+            message["reasoning"] = partial_reasoning.strip()
         self.history.append(message)
         self.sessions.append(self.session_id, message)
         self.episodes.log("jarvis", reply)
@@ -424,6 +458,11 @@ class Jarvis:
         user_text = self.last_user_message()
         if not user_text:
             return ""
+        if self.history and self.history[-1].get("role") in ("user", "tool"):
+            # The failed turn left no reply: continue it instead of asking twice.
+            self._cancel_event.clear()
+            turn_id = self._begin_turn(user_text)
+            return self._run_turn(turn_id, on_text, on_tool, on_tool_result, on_reasoning)
         return self.ask(
             user_text,
             on_text=on_text,

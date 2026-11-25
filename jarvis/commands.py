@@ -461,15 +461,8 @@ def _provider(jarvis, args):
     jarvis._emit("config_changed", section="llm", key="provider")
 
     # Restore this provider's own last-used model instead of carrying a
-    # foreign model over (the classic "works elsewhere but 404s here" error).
-    remembered = remembered_model(jarvis.config, provider)
-    default_model = PROVIDER_PRESETS.get(provider, {}).get("default_model")
-    if not remembered and default_model:
-        remembered = default_model
-    if remembered:
-        jarvis.config["llm"]["model"] = remembered
-        jarvis.llm.reconfigure(jarvis.config)
-        jarvis._emit("config_changed", section="llm", key="model")
+    # foreign one over (the classic "works elsewhere but 404s here" error).
+    _restore_model(jarvis, provider, previous_provider)
 
     if provider == "chatgpt":
         from .providers.chatgpt_auth import get_chatgpt_auth
@@ -505,6 +498,26 @@ def _provider(jarvis, args):
     save_runtime_overrides(jarvis.config, ["llm.provider", "llm.base_url", "llm.api_key_env", "llm.model"])
     summary += f"\nSettings saved to {runtime_config_path(jarvis.config)} (provider + model)"
     return summary
+
+
+def _restore_model(jarvis, provider, previous_provider):
+    """Pick the model for *provider* after a switch.
+
+    Order: the model last used with it, else the preset default. Switching to a
+    different provider with neither resets the model to empty rather than
+    keeping the previous provider's id (it would 404 here). Moving between
+    local servers or from a custom endpoint onto a local server keeps it, since
+    those serve whatever the user has loaded.
+    """
+    model = remembered_model(jarvis.config, provider) or PROVIDER_PRESETS.get(provider, {}).get("default_model")
+    kind = lambda name: PROVIDER_PRESETS.get(name, {}).get("kind", "custom")  # noqa: E731
+    if not model and provider != previous_provider and (kind(provider) != "local" or kind(previous_provider) not in {"local", "custom"}):
+        model = ""
+    if model is None or model == jarvis.config["llm"].get("model"):
+        return
+    jarvis.config["llm"]["model"] = model
+    jarvis.llm.reconfigure(jarvis.config)
+    jarvis._emit("config_changed", section="llm", key="model")
 
 
 def _provider_test(jarvis, args):
@@ -721,15 +734,8 @@ def _write_setting(jarvis, path, raw):
                 "api_key": None,
             })
             jarvis.config["llm"]["provider"] = value
-            # Restore per-provider model like _provider does
-            remembered = remembered_model(jarvis.config, value)
-            if remembered:
-                jarvis.config["llm"]["model"] = remembered
+            _restore_model(jarvis, value, previous_provider)
             _apply_runtime_change(jarvis, path)
-            # Ensure model change is reflected in LLM client as well
-            jarvis.llm.reconfigure(jarvis.config)
-            if remembered:
-                jarvis._emit("config_changed", section="llm", key="model")
             return f"Set provider to {value}: {jarvis.config['llm']['base_url']} (model: {jarvis.config['llm']['model']})"
         else:
             jarvis.config["llm"]["provider"] = value

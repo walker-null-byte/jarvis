@@ -12,11 +12,11 @@ Every backend exposes ``chat(messages, tools, on_text, on_reasoning)``,
 import re
 import time
 
-from .providers import backend_for
-from .providers.errors import LLMError
+from .providers import PRESETS, backend_for
+from .providers.errors import Cancelled, LLMError, explain_error
 from .providers.openai_chat import ChatBackend, resolve_key
 
-__all__ = ["LLM", "LLMError"]
+__all__ = ["LLM", "LLMError", "Cancelled"]
 
 _RETRYABLE_NAMES = {
     "APIConnectionError", "APITimeoutError", "ConnectError", "ConnectTimeout",
@@ -48,6 +48,68 @@ def is_retryable(error):
     if isinstance(error, (ConnectionError, TimeoutError)):
         return True
     return any(cls.__name__ in _RETRYABLE_NAMES for cls in type(error).__mro__)
+
+
+class _Timing:
+    """Wall-clock marks for one request, taken from the streaming callbacks."""
+
+    def __init__(self):
+        self.start = time.monotonic()
+        self.first = None            # first text or reasoning token
+        self.reasoning_start = None
+        self.reasoning_end = None
+
+    def wrap(self, on_text, on_reasoning):
+        def text(token):
+            now = time.monotonic()
+            if self.first is None:
+                self.first = now
+            if self.reasoning_start is not None and self.reasoning_end is None:
+                self.reasoning_end = now
+            if on_text:
+                on_text(token)
+
+        def reasoning(token):
+            now = time.monotonic()
+            if self.first is None:
+                self.first = now
+            if self.reasoning_start is None:
+                self.reasoning_start = now
+            if on_reasoning:
+                on_reasoning(token)
+
+        return text, reasoning
+
+    def stats(self, msg, model, streamed):
+        """Speed/usage numbers for the finished reply (None-valued when unknown)."""
+        end = time.monotonic()
+        usage = msg.pop("usage", None) or {}
+        reported = usage.get("output")
+        if isinstance(reported, int):
+            tokens, approx = reported, False
+        else:
+            chars = len(msg.get("content") or "") + len(msg.get("reasoning") or "")
+            for call in msg.get("tool_calls") or []:
+                chars += len(call["function"].get("arguments") or "") + len(call["function"].get("name") or "")
+            tokens, approx = max(1, round(chars / 4)) if chars else 0, True
+        total = end - self.start
+        ttft = (self.first - self.start) if self.first is not None else None
+        gen = (end - self.first) if (streamed and self.first is not None) else None
+        rate = round(tokens / gen, 1) if (gen and gen >= 0.05 and tokens) else None
+        thinking = None
+        if self.reasoning_start is not None:
+            thinking = (self.reasoning_end or end) - self.reasoning_start
+        return {
+            "model": model,
+            "input_tokens": usage.get("input"),
+            "output_tokens": tokens,
+            "approx": approx,
+            "ttft": round(ttft, 2) if ttft is not None else None,
+            "gen_seconds": round(gen, 2) if gen is not None else None,
+            "seconds": round(total, 2),
+            "tok_per_s": rate,
+            "thinking_seconds": round(thinking, 1) if thinking is not None else None,
+        }
 
 
 class LLM:
@@ -126,18 +188,32 @@ class LLM:
         backoff, never other 4xx and never after partial output.
         """
         for attempt in range(self.retries + 1):
+            timing = _Timing()
+            on_text_t, on_reasoning_t = timing.wrap(on_text, on_reasoning)
             try:
                 self.last_error = None
-                return self._impl.chat(messages, tools, on_text, on_reasoning)
+                msg = self._impl.chat(messages, tools, on_text_t, on_reasoning_t)
+            except Cancelled:
+                raise
             except Exception as error:
                 self.last_error = error
                 if attempt >= self.retries or not is_retryable(error):
-                    if isinstance(error, LLMError):
-                        raise
-                    raise LLMError(
-                        f"LLM request failed after {attempt + 1} attempt(s): {error}"
-                    ) from error
+                    wrapped = self._wrap_error(error)
+                    raise wrapped from (None if wrapped is error else error)
                 time.sleep(self.retry_delay * (2 ** attempt))
+                continue
+            msg["stats"] = timing.stats(msg, self.model, self.stream if self.backend == "chat" else True)
+            return msg
+
+    def _wrap_error(self, error):
+        """A readable LLMError (message, status, raw details) for any failure."""
+        if isinstance(error, LLMError):
+            if not error.provider:
+                error.provider = self.provider
+            return error
+        label = (PRESETS.get(self.provider, {}).get("label") or "").split(" — ")[0]  # custom servers: named by host
+        message, status, details = explain_error(error, label, self.base_url)
+        return LLMError(message, status=status, details=details, provider=self.provider)
 
 
 def _probe_error_message(error, base_url, v1_hint=False):

@@ -140,7 +140,7 @@ def test_tools_array_rebuilt_only_when_registry_changes(tmp_path):
         jarvis.registry.unregister("extra_tool")
 
 
-def test_reasoning_and_provider_state_not_persisted(tmp_path):
+def test_provider_state_not_persisted_but_reasoning_is(tmp_path):
     bus = EventBus()
     events = []
     bus.subscribe(events.append)
@@ -153,9 +153,10 @@ def test_reasoning_and_provider_state_not_persisted(tmp_path):
     assert any(e.kind == "assistant_reasoning_delta" for e in events)
     assert "provider_state" in jarvis.history[-1]  # kept in memory
     saved = jarvis.sessions.load(jarvis.session_id)[-1]
-    assert "provider_state" not in saved and "reasoning" not in saved
+    assert "provider_state" not in saved
+    assert saved["reasoning"] == "thinking..."  # kept so the thinking block survives a reload
     raw = (jarvis.mind / "sessions" / f"{jarvis.session_id}.jsonl").read_text()
-    assert "provider_state" not in raw and "thinking" not in raw
+    assert "provider_state" not in raw
 
 
 def test_summarize_strips_provider_state_from_recent(tmp_path):

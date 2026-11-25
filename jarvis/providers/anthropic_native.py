@@ -135,6 +135,11 @@ def final_to_message(final, model):
         msg["reasoning"] = reasoning
     if items:
         msg["provider_state"] = {"backend": "anthropic", "model": model, "items": items}
+    usage = getattr(final, "usage", None)
+    out_tokens = getattr(usage, "output_tokens", None)
+    if isinstance(out_tokens, int):
+        inp = getattr(usage, "input_tokens", None)
+        msg["usage"] = {"input": inp if isinstance(inp, int) else None, "output": out_tokens}
     return msg
 
 

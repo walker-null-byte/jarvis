@@ -293,6 +293,21 @@ def test_settings_and_providers(env):
     assert status["security_mode"] and status["session"]["id"] == env.jarvis.session_id
 
 
+def test_providers_report_key_status_without_leaking(env, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "super-secret-value")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    env.jarvis.config["llm"]["api_key"] = "sk-session-secret"
+    response = env.client.get("/api/providers")
+    data = response.json()
+    by_id = {p["id"]: p for p in data["providers"]}
+    assert by_id["gemini"]["env_set"] is True
+    assert by_id["openai"]["env_set"] is False
+    assert by_id["custom"]["env_set"] is False
+    assert data["session_key"] is True
+    assert "super-secret-value" not in response.text
+    assert "sk-session-secret" not in response.text
+
+
 def test_commands_list(env):
     commands = env.client.get("/api/commands").json()["commands"]
     assert any(c["name"] == "provider" and c["subcommands"] for c in commands)
@@ -731,3 +746,43 @@ def test_models_endpoint_reports_unreachable_server_without_500(env, monkeypatch
     monkeypatch.setattr(commands, "_test_connection", boom)
     r = env.client.get("/api/models")
     assert r.status_code == 200 and r.json()["ok"] is False and r.json()["models"] == []
+
+
+def test_providers_expose_default_model(env):
+    by_id = {p["id"]: p for p in env.client.get("/api/providers").json()["providers"]}
+    for name in ("openai", "gemini", "openrouter", "groq", "deepseek", "mistral", "xai", "anthropic"):
+        assert by_id[name]["default_model"], name
+    assert by_id["gemini"]["default_model"].startswith("gemini")
+    assert all(not by_id[n]["default_model"] for n in ("lmstudio", "ollama", "llama.cpp", "vllm", "custom"))
+
+
+def test_switching_provider_resets_foreign_model(env, monkeypatch):
+    import jarvis.commands as commands
+    monkeypatch.setattr(commands, "_test_connection", lambda *a, **k: (True, "ok", [], "x"))
+    env.jarvis.config["llm"]["model"] = "some-deepseek-id"
+    env.jarvis.config["llm"]["provider"] = "deepseek"
+    env.client.post("/api/provider", json={"provider": "openai"})
+    assert env.jarvis.config["llm"]["model"] == "gpt-5"  # preset default, not the old id
+    # An explicit model still wins.
+    env.client.post("/api/provider", json={"provider": "gemini", "model": "gemini-2.5-pro"})
+    assert env.jarvis.config["llm"]["model"] == "gemini-2.5-pro"
+    # Hosted -> local server with nothing remembered: no stale hosted id.
+    env.client.post("/api/provider", json={"provider": "vllm"})
+    assert env.jarvis.config["llm"]["model"] == ""
+
+
+def test_provider_test_uses_typed_literal_key_and_never_echoes_it(env, monkeypatch):
+    import jarvis.commands as commands
+    seen = {}
+
+    def fake(jarvis, **kwargs):
+        seen.update(kwargs)
+        return False, "401 bad key sk-secret-123", [], kwargs.get("base_url") or "x"
+    monkeypatch.setattr(commands, "_test_connection", fake)
+    out = env.client.post("/api/provider/test", json={"provider": "gemini", "api_key_env": "sk-secret-123"}).json()
+    assert seen["api_key"] == "sk-secret-123" and not seen["api_key_env"]
+    assert seen["base_url"].startswith("https://generativelanguage")
+    assert "sk-secret-123" not in str(out)
+    # Applying with a literal key keeps it out of the response and off disk.
+    out = env.client.post("/api/provider", json={"provider": "groq", "api_key_env": "gsk-secret-456"}).json()
+    assert "gsk-secret-456" not in out["output"]

@@ -101,6 +101,8 @@ class ChatGPTBackend:
         self.model = llm["model"]
         self.timeout = float(llm.get("timeout", 120))
         self.auth = None  # resolved lazily so importing this module stays cheap
+        self._usage = None
+        self._reasoning = []
 
     def _auth(self):
         return self.auth or get_chatgpt_auth()
@@ -171,10 +173,17 @@ class ChatGPTBackend:
         msg = {"role": "assistant", "content": "".join(text_parts)}
         if tool_calls:
             msg["tool_calls"] = tool_calls
+        reasoning = "".join(self._reasoning).strip()
+        if reasoning:
+            msg["reasoning"] = reasoning
+        if self._usage:
+            msg["usage"] = self._usage
         return msg
 
     def _consume(self, stream, text_parts, tool_calls, on_text, on_reasoning):
         completed = False
+        self._usage = None
+        self._reasoning = []
         for event in stream:
             kind = getattr(event, "type", "") or ""
             if kind == "response.output_text.delta":
@@ -182,8 +191,10 @@ class ChatGPTBackend:
                 if on_text:
                     on_text(event.delta)
             elif "reasoning" in kind and kind.endswith(".delta"):
-                if on_reasoning and getattr(event, "delta", None):
-                    on_reasoning(event.delta)
+                if getattr(event, "delta", None):
+                    self._reasoning.append(event.delta)
+                    if on_reasoning:
+                        on_reasoning(event.delta)
             elif kind == "response.output_item.done":
                 item = event.item
                 if getattr(item, "type", "") == "function_call":
@@ -194,6 +205,11 @@ class ChatGPTBackend:
                     })
             elif kind == "response.completed":
                 completed = True
+                usage = getattr(getattr(event, "response", None), "usage", None)
+                out_tokens = getattr(usage, "output_tokens", None)
+                if isinstance(out_tokens, int):
+                    inp = getattr(usage, "input_tokens", None)
+                    self._usage = {"input": inp if isinstance(inp, int) else None, "output": out_tokens}
             elif kind == "response.failed":
                 err = getattr(event.response, "error", None)
                 code = getattr(err, "code", None)

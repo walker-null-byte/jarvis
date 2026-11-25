@@ -13,7 +13,7 @@ from pathlib import Path
 from .redaction import redact_value
 
 
-NOT_PERSISTED = ("provider_state", "reasoning")
+NOT_PERSISTED = ("provider_state",)  # reasoning and stats are kept so reloads look the same
 
 
 class SessionStore:
@@ -54,7 +54,7 @@ class SessionStore:
                 "message_count": 0,
             })
             path.touch(exist_ok=True)
-        # Provider state and reasoning are in-memory only; never persist them.
+        # Opaque provider state (signed blocks, ids) is in-memory only; never persist it.
         message = {k: v for k, v in message.items() if k not in NOT_PERSISTED}
         safe_message = redact_value(message)
         record = {
