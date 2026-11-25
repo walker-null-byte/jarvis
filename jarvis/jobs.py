@@ -273,7 +273,9 @@ Created: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}
 - last_status: never
 - run_count: 0
 """
-    job_path.write_text(content, encoding="utf-8")
+    tmp = job_path.with_suffix(".md.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(job_path)
 
     # Add crontab entry
     python = os.path.abspath(sys.executable)
@@ -313,6 +315,17 @@ def cron_remove(name: str, config=None):
     return {"removed": name, "scheduler": _scheduler_report(config, removed)}
 
 
+def _next_run(schedule):
+    """Best-effort next run time for a cron schedule (requires croniter if available)."""
+    try:
+        from croniter import croniter
+        base = datetime.datetime.now()
+        itr = croniter(schedule, base)
+        return itr.get_next(datetime.datetime).isoformat(timespec="seconds")
+    except Exception:
+        return None
+
+
 def cron_list(config=None):
     """List all cron jobs."""
     config = config or load_config()
@@ -337,6 +350,7 @@ def cron_list(config=None):
         result.append({
             "name": job_file.stem,
             "schedule": schedule,
+            "next_run": _next_run(schedule) if enabled and schedule else None,
             "enabled": enabled,
             "path": str(job_file),
             "scheduler": scheduler.report(installed),

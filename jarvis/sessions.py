@@ -13,28 +13,49 @@ from pathlib import Path
 from .redaction import redact_value
 
 
+NOT_PERSISTED = ("provider_state", "reasoning")
+
+
 class SessionStore:
     def __init__(self, mind):
         self.root = Path(mind) / "sessions"
         self.root.mkdir(parents=True, exist_ok=True)
+        # Sessions with no messages yet live only in memory, so opening the
+        # UI (or a quick --doctor run) doesn't litter mind/sessions/ with empty
+        # files. The first append() writes them to disk.
+        self._pending = {}
 
-    def create(self, title="New conversation"):
+    def create(self, title="New conversation", character="jarvis"):
         session_id = uuid.uuid4().hex[:12]
         now = datetime.datetime.now().isoformat(timespec="seconds")
-        self._write_meta(session_id, {
+        self._pending[session_id] = {
             "id": session_id,
             "title": title,
             "created": now,
             "updated": now,
             "message_count": 0,
-        })
-        self._messages_path(session_id).touch()
+            "character": character,
+        }
         return session_id
 
     def append(self, session_id, message):
         path = self._messages_path(session_id)
-        if not path.parent.exists():
-            self.create(session_id)
+        if session_id in self._pending:
+            # First message: persist the session for real.
+            self._write_meta(session_id, self._pending.pop(session_id))
+            path.touch(exist_ok=True)
+        if not self._meta_path(session_id).exists():
+            # Re-create metadata for this specific id if missing (e.g. resumed after deletion)
+            self._write_meta(session_id, {
+                "id": session_id,
+                "title": "Conversation",
+                "created": datetime.datetime.now().isoformat(timespec="seconds"),
+                "updated": datetime.datetime.now().isoformat(timespec="milliseconds"),
+                "message_count": 0,
+            })
+            path.touch(exist_ok=True)
+        # Provider state and reasoning are in-memory only; never persist them.
+        message = {k: v for k, v in message.items() if k not in NOT_PERSISTED}
         safe_message = redact_value(message)
         record = {
             "timestamp": datetime.datetime.now().isoformat(timespec="milliseconds"),
@@ -65,7 +86,37 @@ class SessionStore:
                 continue
         return messages
 
+    def truncate_tail(self, session_id, n):
+        """Drop the last n persisted messages (atomic rewrite). Returns how many
+        were dropped. No-op for pending (unsaved) or unknown sessions."""
+        path = self._messages_path(session_id)
+        if n <= 0 or session_id in self._pending or not path.exists():
+            return 0
+        lines = path.read_text(encoding="utf-8").splitlines()
+
+        def is_record(line):
+            try:
+                return isinstance(json.loads(line).get("message"), dict)
+            except (json.JSONDecodeError, AttributeError):
+                return False
+
+        dropped, keep = 0, list(lines)
+        while keep and dropped < n:
+            if is_record(keep.pop()):
+                dropped += 1
+        temporary = path.with_suffix(".jsonl.tmp")
+        temporary.write_text("".join(line + "\n" for line in keep), encoding="utf-8")
+        temporary.replace(path)
+        meta = self.get(session_id)
+        if meta:
+            meta["message_count"] = sum(1 for line in keep if is_record(line))
+            meta["updated"] = datetime.datetime.now().isoformat(timespec="milliseconds")
+            self._write_meta(session_id, meta)
+        return dropped
+
     def get(self, session_id):
+        if session_id in self._pending:
+            return dict(self._pending[session_id])
         path = self._meta_path(session_id)
         if not path.exists():
             return None
@@ -126,7 +177,44 @@ class SessionStore:
         return content
 
     def exists(self, session_id):
+        if session_id in self._pending:
+            return True
         return self._meta_path(session_id).exists() and self._messages_path(session_id).exists()
+
+    def delete(self, session_id):
+        """Delete a session and its messages. Returns True on success."""
+        if self._pending.pop(session_id, None) is not None:
+            return True
+        if not self.exists(session_id):
+            return False
+        try:
+            self._meta_path(session_id).unlink()
+            self._messages_path(session_id).unlink()
+            return True
+        except OSError:
+            return False
+
+    def rename(self, session_id, title):
+        """Rename a session title."""
+        meta = self.get(session_id)
+        if not meta:
+            return None
+        title = (title or "").strip()[:70] or "Conversation"
+        meta["title"] = title
+        meta["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
+        self._write_meta(session_id, meta)
+        return meta
+
+    def get_character(self, session_id):
+        return (self.get(session_id) or {}).get("character") or ""
+
+    def set_character(self, session_id, character):
+        meta = self.get(session_id)
+        if not meta:
+            return None
+        meta["character"] = character
+        self._write_meta(session_id, meta)
+        return meta
 
     def _meta_path(self, session_id):
         return self.root / f"{session_id}.json"
@@ -159,6 +247,9 @@ class SessionStore:
         return "\n".join(lines)
 
     def _write_meta(self, session_id, data):
+        if session_id in self._pending:  # not on disk yet (see __init__)
+            self._pending[session_id] = data
+            return
         path = self._meta_path(session_id)
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

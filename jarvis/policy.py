@@ -14,6 +14,9 @@ DEFAULT_BLOCKED_COMMANDS = (
     r"\bdd\s+if=",
     r":\(\)\s*\{",
     r"\bgit\s+(reset|clean)\b",
+    r"\b(find\s+.*-exec|\bxargs\s+.*rm)\b",
+    r"\b(curl|wget)\b.*\|\s*(sh|bash)\b",
+    r"\bchmod\s+.*777\b",
 )
 
 
@@ -56,14 +59,34 @@ class CapabilityPolicy:
     def command_requires_approval(self, command):
         if self.mode == "permissive":
             return False
-        return bool(re.search(r"(^|\s)(sudo|git\s+push|mv|chmod)\b|\s>{1,2}\s*", command, re.I))
+        # Require approval for privileged/destructive verbs and shell metachars
+        if re.search(r"(^|\s)(sudo|git\s+push|mv|chmod)\b", command, re.I):
+            return True
+        if any(ch in command for ch in [">", "|", ";", "$", "`"]):
+            return True
+        if "&&" in command or "||" in command:
+            return True
+        return False
+
+    _HUMAN_MESSAGES = {
+        r"\brm\s+(-[a-z]*r[a-z]*|--recursive)": "recursive delete (rm -r) is blocked — use explicit file tools or a precise path",
+        r"\b(mkfs|fdisk|parted)\b": "disk partitioning/formatting is blocked",
+        r"\b(shutdown|reboot|poweroff|halt)\b": "system shutdown/reboot is blocked",
+        r"\bdd\s+if=": "raw disk copy (dd) is blocked",
+        r":\(\)\s*\{": "fork bomb pattern is blocked",
+        r"\bgit\s+(reset|clean)\b": "destructive git reset/clean is blocked",
+        r"\b(find\s+.*-exec|\bxargs\s+.*rm)\b": "find -exec / xargs rm is blocked",
+        r"\b(curl|wget)\b.*\|\s*(sh|bash)\b": "piping curl/wget to shell is blocked",
+        r"\bchmod\s+.*777\b": "chmod 777 is blocked",
+    }
 
     def check_command(self, command, timeout):
         if self.mode == "permissive":
             return ""
         for pattern in self.blocked_commands:
             if re.search(pattern, command, flags=re.IGNORECASE):
-                return f"Command blocked by safety policy: pattern {pattern!r}"
+                human = self._HUMAN_MESSAGES.get(pattern, pattern)
+                return f"Command blocked by safety policy: {human}"
         if timeout < 1 or timeout > self.max_timeout:
             return f"Command timeout must be between 1 and {self.max_timeout} seconds"
         return ""

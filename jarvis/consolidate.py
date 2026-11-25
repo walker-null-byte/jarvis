@@ -280,7 +280,7 @@ def consolidate(mind=None, config=None, model_override=None, client=None):
     if client is None:
         from openai import OpenAI
         llm_cfg = config["llm"]
-        api_key = os.environ.get(llm_cfg["api_key_env"]) or "not-needed"
+        api_key = llm_cfg.get("api_key") or os.environ.get(llm_cfg["api_key_env"] or "") or "not-needed"
         client = OpenAI(base_url=llm_cfg["base_url"], api_key=api_key)
     model = model_override or config["llm"]["model"]
 
@@ -304,7 +304,11 @@ def consolidate(mind=None, config=None, model_override=None, client=None):
                 provenance="Distilled from the daily episode log",
                 review_status="pending",
             )
-            if r["updated"]:
+            if r.get("blocked"):
+                continue
+            if r.get("error"):
+                continue
+            if r.get("updated"):
                 summary["facts_updated"] += 1
             else:
                 summary["facts_added"] += 1
@@ -322,13 +326,16 @@ def consolidate(mind=None, config=None, model_override=None, client=None):
         existing = {p.stem for p in skills_dir.glob("*.md")}
         for sk in _draft_skills(client, model, week_episodes, skills_dir):
             name = sk.get("name")
-            if not name or name in existing:
+            if not name or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name) or name in existing:
                 continue
             body = f"# {sk.get('description', '')}\n\n"
             body += "## When to use\n" + sk.get("description", "") + "\n\n"
             body += "## Steps\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(sk.get("steps", []))) + "\n\n"
             body += "## Tools needed\n" + ", ".join(sk.get("tools_needed", [])) + "\n"
-            (skills_dir / f"{name}.md").write_text(body, encoding="utf-8")
+            target = skills_dir / f"{name}.md"
+            tmp = target.with_suffix(".md.tmp")
+            tmp.write_text(body, encoding="utf-8")
+            tmp.replace(target)
             summary["skills_drafted"] += 1
 
     # 4) Decay untouched facts; archive very weak ones

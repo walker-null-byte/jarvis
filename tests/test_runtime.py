@@ -38,7 +38,7 @@ def _temp_config(tmp_path):
     return config
 
 
-def _fake_test_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True):
+def _fake_test_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True, provider=None):
     url = base_url or jarvis.config["llm"].get("base_url") or "http://example.test/v1"
     return True, "Connected — 2 model(s) listed", ["a", "b"], url
 
@@ -118,7 +118,8 @@ def test_slash_commands_change_runtime_and_persist_selected_settings(tmp_path):
 
 def test_slash_command_suggestions_filter_top_level_and_subcommands():
     assert [item["command"] for item in slash_command_suggestions("/")] == [
-        "/help", "/model", "/provider", "/settings", "/status"
+        "/help", "/model", "/provider", "/login", "/logout", "/character", "/voice",
+        "/settings", "/status",
     ]
     assert [item["command"] for item in slash_command_suggestions("/mod")] == ["/model"]
     assert [item["command"] for item in slash_command_suggestions("/model ")] == [
@@ -325,7 +326,7 @@ def test_agent_emits_events_and_persists_messages(tmp_path):
     jarvis = Jarvis(config, event_bus=bus)
 
     class FakeLLM:
-        def chat(self, messages, tools=None, on_text=None):
+        def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
             if on_text:
                 on_text("Acknowledged.")
             return {"role": "assistant", "content": "Acknowledged."}
@@ -472,7 +473,10 @@ def test_llm_retries_transient_failures_without_network(tmp_path):
         def create(self, **kwargs):
             self.attempts += 1
             if self.attempts < 3:
-                raise RuntimeError("temporary endpoint failure")
+                # Transient (5xx) failures are retried; plain 4xx/unknown errors are not.
+                error = RuntimeError("temporary endpoint failure")
+                error.status_code = 503
+                raise error
             message = type("Message", (), {"content": "ok", "tool_calls": None})()
             choice = type("Choice", (), {"message": message})()
             return type("Response", (), {"choices": [choice]})()
@@ -528,7 +532,7 @@ def test_agent_writes_redacted_audit_record(tmp_path):
     jarvis = Jarvis(config)
 
     class FakeLLM:
-        def chat(self, messages, tools=None, on_text=None):
+        def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
             if on_text:
                 on_text("done")
             return {"role": "assistant", "content": "done"}
@@ -548,7 +552,7 @@ def test_agent_retries_last_user_turn_as_a_new_turn(tmp_path):
     class FakeLLM:
         calls = 0
 
-        def chat(self, messages, tools=None, on_text=None):
+        def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
             self.calls += 1
             reply = f"response {self.calls}"
             if on_text:
@@ -740,7 +744,7 @@ def test_ui_provider_manager_auto_refreshes_models_on_url_change(tmp_path, monke
     config = _temp_config(tmp_path)
     jarvis = Jarvis(config)
 
-    def fake_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True):
+    def fake_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True, provider=None):
         url = base_url or jarvis.config["llm"].get("base_url") or "http://example.test/v1"
         ids = ["c", "d", "e"] if "beta" in url else ["a", "b"]
         return True, "Connected", ids, url
@@ -878,7 +882,7 @@ def test_ui_provider_manager_keeps_models_when_retest_fails(tmp_path, monkeypatc
     config = _temp_config(tmp_path)
     jarvis = Jarvis(config)
 
-    def fake_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True):
+    def fake_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True, provider=None):
         url = base_url or jarvis.config["llm"].get("base_url") or "http://example.test/v1"
         if "bad" in url:
             return False, "HTTP 401: Invalid API key", [], 401
@@ -958,7 +962,7 @@ def test_ui_provider_manager_autofixes_missing_v1_in_url_field(tmp_path, monkeyp
     config = _temp_config(tmp_path)
     jarvis = Jarvis(config)
 
-    def fake_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True):
+    def fake_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True, provider=None):
         url = base_url or jarvis.config["llm"].get("base_url") or "http://example.test/v1"
         if not url.rstrip("/").endswith("/v1"):
             return True, "Connected (appended /v1)", ["a", "b"], url.rstrip("/") + "/v1"
@@ -1005,7 +1009,7 @@ def test_ui_provider_manager_test_skips_configured_model_check(tmp_path, monkeyp
     jarvis = Jarvis(config)
     seen = {}
 
-    def fake_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True):
+    def fake_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True, provider=None):
         seen["check_model"] = check_model
         url = base_url or jarvis.config["llm"].get("base_url") or "http://example.test/v1"
         return True, "Connected — 2 model(s) listed", ["a", "b"], url

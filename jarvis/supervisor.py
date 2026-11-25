@@ -71,6 +71,12 @@ def main():
             print("[supervisor] Jarvis exited cleanly", file=sys.stderr)
             break
 
+        # Don't loop on config/dependency errors — they won't fix themselves
+        stderr_text = crash_info.get("stderr", "") if crash_info else ""
+        if "config" in stderr_text.lower() or "No such file" in stderr_text or "ModuleNotFoundError" in stderr_text:
+            print(f"[supervisor] Not restarting — appears to be a config/dependency error: {stderr_text[:300]}", file=sys.stderr)
+            log_crash(config, crash_info)
+            sys.exit(exit_code)
         print(f"[supervisor] Jarvis crashed (exit {exit_code}), restarting in {restart_delay}s...", file=sys.stderr)
         log_crash(config, crash_info)
         restarts += 1

@@ -6,7 +6,8 @@ import re
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key|token|password|secret|authorization)\s*[:=]\s*(['\"]?)([^\s,'\"]+)"),
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
-    re.compile(r"\b(?:sk|ghp|github_pat|xox[baprs])_[A-Za-z0-9._-]{12,}\b"),
+    re.compile(r"\b(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9._-]{12,}\b"),
+    re.compile(r"(?i)\bpassword\s+is\s+[^\s]+\b"),
 )
 
 

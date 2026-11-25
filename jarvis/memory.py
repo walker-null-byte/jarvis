@@ -131,7 +131,10 @@ class FactStore:
         review_note="",
     ):
         """Save a fact with reviewable source and validity metadata."""
-        name = _slugify(str(name or fact))
+        # Redact before slugify so secrets don't leak into filenames
+        redacted_fact = redact_text(str(fact or "")).strip()
+        redacted_name = redact_text(str(name or "")).strip()
+        name = _slugify(redacted_name or redacted_fact)
         blocked = self._blocked_rule(fact, why, name)
         if blocked:
             return {
@@ -139,7 +142,9 @@ class FactStore:
                 "reason": "Never-remember rule matched",
                 "rule": blocked,
             }
-        path = self.dir / f"{name}.md"
+        path = self._path_for_name(name)
+        if not path:
+            return {"error": f"Invalid memory id '{name}'."}
         old = self._read(path)["meta"] if path.exists() else {}
         effective_source = source or old.get("source") or "direct"
         default_review = old.get("review_status")
@@ -148,7 +153,7 @@ class FactStore:
 
         meta = {
             "created": old.get("created", _today()),
-            "strength": round(float(old.get("strength", 0.5)) + 0.5, 2),
+            "strength": round(min(5.0, float(old.get("strength", 0.5)) + 0.5), 2),
             "recalls": int(old.get("recalls", 0)),
             "last_recalled": old.get("last_recalled", ""),
             "source": self._meta_value(effective_source, "direct"),
@@ -208,7 +213,7 @@ class FactStore:
         for _, path, data in scored[:top_n]:
             meta = data["meta"]
             meta["recalls"] = int(meta.get("recalls", 0)) + 1
-            meta["strength"] = round(float(meta.get("strength", 1.0)) + 0.25, 2)
+            meta["strength"] = round(min(5.0, float(meta.get("strength", 1.0)) + 0.25), 2)
             meta["last_recalled"] = _today()
             self._write(path, meta, data["body"])
             results.append({
@@ -261,7 +266,11 @@ class FactStore:
         if not path or not path.exists():
             return {"error": f"No memory named '{name}'."}
         decision = (decision or "").strip().lower()
-        aliases = {"keep": "approved", "approve": "approved", "reject": "rejected", "expire": "expired"}
+        aliases = {
+            "keep": "approved", "approve": "approved", "approved": "approved",
+            "reject": "rejected", "rejected": "rejected",
+            "expire": "expired", "expired": "expired",
+        }
         status = aliases.get(decision)
         if not status:
             return {"error": "Decision must be approve, reject, or expire."}

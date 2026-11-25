@@ -177,14 +177,24 @@ class MessageCard(Static):
     def __init__(self, role, content="", *args, **kwargs):
         self.role = role
         self._message_content = content
+        self._is_streaming = False
         super().__init__(self._renderable(), *args, **kwargs)
 
-    def set_content(self, content):
+    def set_content(self, content, streaming=False):
         self._message_content = content
+        self._is_streaming = streaming
+        self.update(self._renderable())
+
+    def finalize(self, content):
+        self._message_content = content
+        self._is_streaming = False
         self.update(self._renderable())
 
     def _renderable(self):
         if self.role == "assistant":
+            # During streaming render as plain Text to avoid Markdown re-parse flicker
+            if self._is_streaming:
+                return Text(self._message_content or "▌")
             return Markdown(self._message_content or "▌")
         if self.role == "error":
             return Text(self._message_content, style="bold red")
@@ -444,6 +454,7 @@ class ProviderScreen(ModalScreen):
             api_key_env=env_name,
             api_key=literal,
             check_model=False,
+            provider=provider,
         )
         self.app.call_from_thread(
             self._test_done, seq, ok, message, ids, working_url, provider
@@ -663,17 +674,23 @@ class JarvisUI(App):
     #chat-subtitle { height: 1; color: #6f8da2; content-align: left top; }
     #chat-presence { width: 18; color: #61dbb9; content-align: center middle; text-style: bold; }
     #chat { height: 1fr; min-height: 0; overflow-y: auto; padding: 1 1; }
-    #welcome { width: 72%; min-height: 10; margin: 5 0 0 2; padding: 2 3; border: double #266080; background: #0b1d2b; content-align: center middle; }
+    #welcome { width: 72%; min-height: 8; margin: 1 0 0 2; padding: 2 3; border: double #266080; background: #0b1d2b; content-align: center middle; }
     .message { width: 92%; margin: 0 0 1 0; padding: 1 2; border: round #1b3449; background: #0c1723; }
     .message.user { width: 76%; border-left: thick #42b8ea; background: #0d2030; color: #d7efff; }
     .message.assistant { border-left: thick #50d5bd; background: #0d211f; }
     .message.error { border-left: thick #f06d91; background: #2a1722; }
     .message.system { width: 92%; border-left: thick #6e85a0; background: #0b1621; color: #b7ccda; }
     .artifact { margin: 0 0 1 2; padding: 1; border: round #3b7597; background: #0c1e2e; }
-    #input-row { height: auto; min-height: 7; padding: 1 0 0 0; border-top: solid #1d3a50; }
-    #command-palette { height: 7; max-height: 7; margin: 0 0 1 3; display: none; background: #0a1826; border: round #34799a; color: #cfeeff; }
+    #input-row { height: auto; min-height: 5; padding: 1 0 0 0; border-top: solid #1d3a50; }
+    #command-palette { height: auto; max-height: 5; margin: 0 0 1 3; display: none; background: #0a1826; border: round #34799a; color: #cfeeff; }
     #command-palette.visible { display: block; }
     #command-palette:focus { border: double #62dfff; }
+    /* Compact mode for small terminals */
+    .compact #rail { width: 30; min-width: 28; }
+    .compact #orb { height: 10; min-height: 10; }
+    .compact #welcome { width: 90%; margin: 1 0 0 1; }
+    .compact #chat-presence { display: none; }
+    .compact #hint { display: none; }
     #composer-line { height: 4; }
     #composer-prefix { width: 3; height: 3; content-align: center middle; color: #52d8be; background: #102a2a; border: round #2d786e; text-style: bold; }
     #input { width: 1fr; height: 3; min-height: 3; background: #102333; border: round #3b7798; padding: 0 1; color: #e4f5ff; }
@@ -712,12 +729,12 @@ class JarvisUI(App):
     """
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit"),
-        Binding("ctrl+space", "push_to_talk", "Push-to-Talk", show=False),
-        Binding("escape", "cancel_turn", "Stop", show=False),
-        Binding("ctrl+n", "new_session", "New session", show=False),
-        Binding("ctrl+r", "retry_last_turn", "Retry", show=False),
-        Binding("ctrl+e", "export_session", "Export", show=False),
-        Binding("ctrl+v", "paste", "Paste", show=False),
+        Binding("ctrl+space", "push_to_talk", "Push-to-Talk"),
+        Binding("escape", "cancel_turn", "Stop"),
+        Binding("ctrl+n", "new_session", "New session"),
+        Binding("ctrl+r", "retry_last_turn", "Retry"),
+        Binding("ctrl+e", "export_session", "Export"),
+        Binding("ctrl+v", "paste", "Paste"),
     ]
 
     def __init__(self, jarvis):
@@ -733,6 +750,8 @@ class JarvisUI(App):
         self._selected_memory = ""
         self._command_palette_suggestions = []
         self._command_palette_visible = False
+        self._search_timer = None
+        self._pending_search = ""
         self._event_callback = self._on_event
         self.jarvis.events.subscribe(self._event_callback)
         self.jarvis.voice.set_amplitude_callback(self._on_amplitude)
@@ -819,6 +838,21 @@ class JarvisUI(App):
         self._refresh_memory_review()
         self.query_one("#input", Input).focus()
         self.set_interval(0.12, self._animate_orb)
+        self._check_compact()
+
+    def on_resize(self, event):
+        self._check_compact()
+
+    def _check_compact(self):
+        try:
+            w, h = self.size.width, self.size.height
+            compact = w < 90 or h < 22
+            if compact:
+                self.add_class("compact")
+            else:
+                self.remove_class("compact")
+        except Exception:
+            pass
 
     def on_unmount(self):
         self.jarvis.events.unsubscribe(self._event_callback)
@@ -841,6 +875,7 @@ class JarvisUI(App):
             name = event.data.get("name", "tool")
             args = json.dumps(event.data.get("args", {}), default=str)[:180]
             self.call_from_thread(self._activity, f"⚙ {name}  {args}")
+            self.call_from_thread(self._expand_activity)
             self.call_from_thread(self._set_state, "Working")
         elif event.kind == "tool_finished":
             name = event.data.get("name", "tool")
@@ -871,7 +906,10 @@ class JarvisUI(App):
             self.jarvis.voice.set_amplitude_callback(self._on_amplitude)
             self.call_from_thread(self._refresh_runtime_labels)
         elif event.kind == "error":
-            self.call_from_thread(self._add_message, "error", event.data.get("message", "Unknown error"))
+            msg = event.data.get("message", "Unknown error")
+            self.call_from_thread(self._add_message, "error", msg)
+            self.call_from_thread(self._diagnostic, msg)
+            self.call_from_thread(self._expand_diagnostics)
 
     def _set_state(self, state):
         self._waveform.set_state(state)
@@ -898,20 +936,23 @@ class JarvisUI(App):
     def _begin_assistant(self, initial=""):
         self._stream_buffer = ""
         self._active_message = self._add_message("assistant", initial)
+        # Mark as streaming so Markdown is deferred
+        if self._active_message:
+            self._active_message._is_streaming = True
 
     def _append_assistant(self, token):
         if self._active_message is None:
             self._begin_assistant()
         self._stream_buffer += token
-        self._active_message.set_content(self._stream_buffer)
-        self.query_one("#chat", ChatView).scroll_end()
+        self._active_message.set_content(self._stream_buffer, streaming=True)
+        self.query_one("#chat", ChatView).scroll_end(animate=False)
 
     def _finish_assistant(self, content):
         if self._active_message is None:
             self._begin_assistant()
         self._stream_buffer = content
-        self._active_message.set_content(content or "(no response)")
-        self.query_one("#chat", ChatView).scroll_end()
+        self._active_message.finalize(content or "(no response)")
+        self.query_one("#chat", ChatView).scroll_end(animate=False)
 
     def _show_artifact(self, artifact):
         if not artifact:
@@ -923,8 +964,25 @@ class JarvisUI(App):
     def _activity(self, text):
         self.query_one("#activity-log", RichLog).write(Text(text, style="yellow"))
 
+    def _expand_activity(self):
+        try:
+            panel = self.query_one("#activity-panel", Collapsible)
+            panel.collapsed = False
+        except Exception:
+            pass
+
     def _diagnostic(self, text):
         self.query_one("#diagnostics-log", RichLog).write(Text(text, style="red"))
+        try:
+            self.notify(text, severity="error", timeout=5)
+        except Exception:
+            pass
+
+    def _expand_diagnostics(self):
+        try:
+            self.query_one("#diagnostics-panel", Collapsible).collapsed = False
+        except Exception:
+            pass
 
     def _show_approval(self, data):
         self._pending_approval = data.get("request_id")
@@ -932,6 +990,11 @@ class JarvisUI(App):
         self.query_one("#approval-text", Static).update(f"Approval needed: {data.get('action')}  {payload[:180]}")
         self.query_one("#approval-row").add_class("visible")
         self._set_state("Approval needed")
+        try:
+            self.query_one("#approve", Button).focus()
+            self.notify("Approval required — press Allow or Deny", timeout=4)
+        except Exception:
+            pass
 
     def _hide_approval(self):
         self._pending_approval = None
@@ -940,6 +1003,13 @@ class JarvisUI(App):
     def on_button_pressed(self, event):
         button_id = event.button.id
         if button_id == "send":
+            # When a turn is in progress, Send is repurposed as Stop
+            try:
+                if self.query_one("#input", Input).disabled:
+                    self.action_cancel_turn()
+                    return
+            except Exception:
+                pass
             self._submit_input()
             return
         if button_id in {"approve", "deny"}:
@@ -1009,9 +1079,17 @@ class JarvisUI(App):
 
     def on_input_changed(self, event):
         if event.input.id == "session-search":
-            self._refresh_sessions(event.value)
+            # Debounce: avoid scanning all sessions on every keystroke
+            self._pending_search = event.value
+            if self._search_timer is not None:
+                self._search_timer.stop()
+            self._search_timer = self.set_timer(0.25, self._do_search)
         elif event.input.id == "input":
             self._update_command_palette(event.value)
+
+    def _do_search(self):
+        self._search_timer = None
+        self._refresh_sessions(self._pending_search)
 
     def _update_command_palette(self, value):
         suggestions = slash_command_suggestions(value)
@@ -1257,9 +1335,11 @@ class JarvisUI(App):
 
     def _submit_turn(self, text):
         box = self.query_one("#input", Input)
+        send = self.query_one("#send", Button)
         box.disabled = True
-        self.query_one("#send", Button).disabled = True
-        box.placeholder = "Jarvis is working…"
+        box.placeholder = "Jarvis is working… — Esc to stop"
+        send.label = "Stop ■"
+        send.variant = "error"
         self.run_worker(lambda: self._turn(text), thread=True, exclusive=True)
 
     def _turn(self, text):
@@ -1276,8 +1356,11 @@ class JarvisUI(App):
 
     def _reenable_input(self):
         box = self.query_one("#input", Input)
+        send = self.query_one("#send", Button)
         box.disabled = False
-        self.query_one("#send", Button).disabled = False
+        send.label = "Send  ↵"
+        send.variant = "primary"
+        send.disabled = False
         box.placeholder = "Type a message to Jarvis…"
         self._set_state("Ready")
         box.focus()

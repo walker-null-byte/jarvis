@@ -12,8 +12,6 @@ import subprocess
 from pathlib import Path
 
 from jarvis.config import load_config, mind_dir
-from jarvis.tools_core import build_registry
-from jarvis.mind_tools import build_mind_tools
 
 
 # ---------- git helpers ----------
@@ -65,152 +63,105 @@ def _parse_skill(path):
 
 # ---------- code generation ----------
 
-def _generate_tool_code(skill):
-    """Generate a Python tool module that actually executes its steps."""
-    name = skill["name"]
-    func_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
-    description = skill["description"].replace('"', '\\"').replace('\n', ' ')
-    steps_json = json.dumps(skill["steps"])
-    tools_needed = ", ".join(skill["tools_needed"])
-    steps_formatted = chr(10).join(f"  {i+1}. {s}" for i, s in enumerate(skill["steps"]))
-
-    # Pre-build the prompt template with constant values interpolated
-    # Use QUADRUPLE braces for literals: after json.dumps they become double,
-    # then .format() makes them single in the final prompt
-    prompt_template = (
-        "You are executing step {{step_num}} of the \"{name}\" skill.\n"
-        "Skill: {description}\n"
-        "Step: {{step}}\n"
-        "Available tools: {{tool_names}}\n"
-        "{{context_summary}}\n\n"
-        "Respond with ONLY a JSON object:\n"
-        "{{{{\n"
-        '  "tool": "tool_name",\n'
-        '  "arguments": {{{{"arg": "value"}}}}\n'
-        "}}}}\n"
-        "Or if no tool is needed (e.g., pure computation), respond with:\n"
-        "{{{{\n"
-        '  "tool": null,\n'
-        '  "result": "computed result"\n'
-        "}}}}"
-    ).format(name=name, description=description)
-    
-    # No additional escaping needed - json.dumps will handle it
-    prompt_template_escaped = prompt_template
-
-    module_doc = f"""Auto-generated tool from skill: {name}
-{description}
-
-Steps:
-{steps_formatted}
-
-Tools needed: {tools_needed}"""
-    code = f'''{json.dumps(module_doc)}
+TOOL_TEMPLATE = '''__DOC__
 
 import json
-from turbomcp import TurboMCP
+import re
 
 
-def {func_name}(**kwargs):
-    """Execute the {name} skill procedure."""
-    # Import here to avoid circular imports
-    from jarvis.tools_core import build_registry
-    from jarvis.mind_tools import build_mind_tools
-    from jarvis.config import load_config, mind_dir
-    from jarvis.context import ensure_mind
+def __FUNC__(**kwargs):
+    """Execute the __NAME__ skill procedure."""
+    # Imported here to avoid circular imports at load time.
+    from jarvis.config import load_config
     from jarvis.llm import LLM
+    from jarvis.registry import get_registry
 
     cfg = load_config()
-    mind = ensure_mind(cfg)
-    registry = build_registry()
-    for f in build_mind_tools(mind):
-        registry.register(f)
-
-    # Get available tools for the LLM to choose from
-    available_tools = registry.to_openai_tools()
+    registry = get_registry(cfg)  # shared registry: approvals are wired by the running agent
     llm = LLM(cfg)
 
+    # Offer the nested model only the tools this skill needs (fall back to core tools).
+    existing = set(registry.tool_names())
+    wanted = [w for item in __TOOLS__ for w in re.findall(r"[A-Za-z0-9_]+", item) if w in existing]
+    names = sorted(set(wanted)) or [n for n in cfg["agent"]["core_tools"] if n in existing]
+    tools = registry.to_openai_tools(names)
+
     results = []
-    context = {{}}  # Accumulated context from previous steps
+    context = {}  # results of previous steps
 
-    for i, step in enumerate({steps_json}):
-        step_num = i + 1
+    for step_num, step in enumerate(__STEPS__, start=1):
         try:
-            # Build a prompt for the LLM to translate this step into tool calls
-            context_summary = ""
+            prompt = "Skill: __DESC__\\nStep " + str(step_num) + ": " + step
             if context:
-                context_summary = "\\nPrevious results:\\n" + json.dumps(context, indent=2)[:3000]
-
-            tool_names = ", ".join(t['function']['name'] for t in available_tools)
-            prompt = {json.dumps(prompt_template)}.format(
-                step_num=step_num,
-                step=step,
-                tool_names=tool_names,
-                context_summary=context_summary
-            )
-
+                prompt += "\\nPrevious results:\\n" + json.dumps(context, indent=2, default=str)[:3000]
             messages = [
-                {{"role": "system", "content": "You are a tool executor. Output ONLY valid JSON."}},
-                {{"role": "user", "content": prompt}}
+                {"role": "system", "content": "You execute one step of a skill. Call the provided tools to do it; if no tool is needed, answer in plain text."},
+                {"role": "user", "content": prompt},
             ]
-            response = llm.chat(messages, tools=available_tools)
-            content = (response.get("content") or "").strip()
+            response = llm.chat(messages, tools=tools)
 
-            # Parse LLM response
-            try:
-                decision = json.loads(content)
-            except json.JSONDecodeError:
-                # Try to extract JSON from markdown/code fences
-                import re
-                match = re.search(r'\\{{.*\\}}', content, re.DOTALL)
-                if match:
-                    decision = json.loads(match.group(0))
+            calls = response.get("tool_calls") or []
+            if not calls:
+                # Fallback for models that answer with JSON text instead of tool calls.
+                content = (response.get("content") or "").strip()
+                match = re.search(r"\\{.*\\}", content, re.DOTALL)
+                try:
+                    decision = json.loads(match.group(0)) if match else {}
+                except ValueError:
+                    decision = {}
+                if decision.get("tool"):
+                    calls = [{"function": {"name": decision["tool"], "arguments": json.dumps(decision.get("arguments", {}))}}]
                 else:
-                    raise
+                    results.append({"step": step_num, "description": step, "result": decision.get("result", content), "status": "computed"})
+                    context["step_" + str(step_num) + "_result"] = decision.get("result", content)
+                    continue
 
-            if decision.get("tool"):
-                tool_name = decision["tool"]
-                arguments = decision.get("arguments", {{}})
-                # Execute the tool
+            for call in calls:
+                tool_name = call["function"]["name"]
+                arguments = json.loads(call["function"]["arguments"] or "{}")
+                if tool_name not in names:
+                    raise ValueError("tool not allowed for this skill: " + tool_name)
                 tool_result = registry.call(tool_name, arguments)
-                results.append({{
-                    "step": step_num,
-                    "description": step,
-                    "tool_called": tool_name,
-                    "arguments": arguments,
-                    "result": tool_result,
-                    "status": "executed"
-                }})
-                context[f"step_{{step_num}}_result"] = tool_result
-            else:
-                # No tool needed - just record the computed result
-                result = decision.get("result", "")
-                results.append({{
-                    "step": step_num,
-                    "description": step,
-                    "tool_called": None,
-                    "result": result,
-                    "status": "computed"
-                }})
-                context[f"step_{{step_num}}_result"] = result
-
+                results.append({"step": step_num, "description": step, "tool_called": tool_name,
+                                "arguments": arguments, "result": tool_result, "status": "executed"})
+                context["step_" + str(step_num) + "_result"] = tool_result
         except Exception as e:
-            results.append({{"step": step_num, "description": step, "error": str(e), "status": "failed"}})
+            results.append({"step": step_num, "description": step, "error": str(e), "status": "failed"})
             break
 
-    return {{
-        "skill": {json.dumps(name)},
-        "executed": True,
-        "steps": results,
-        "context": context,
-    }}
+    return {"skill": __NAME_JSON__, "executed": True, "steps": results, "context": context}
 
 
 def register(registry):
     """Register this tool with a TurboMCP registry."""
-    registry.register({func_name}, name={json.dumps(name)}, description={json.dumps(description)})
-    return {func_name}
+    registry.register(__FUNC__, name=__NAME_JSON__, description=__DESC_JSON__)
+    return __FUNC__
 '''
+
+
+def _generate_tool_code(skill):
+    """Generate a Python tool module that actually executes its steps."""
+    name = skill["name"]
+    description = skill["description"].replace("\n", " ")
+    steps_formatted = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(skill["steps"]))
+    doc = (
+        f"Auto-generated tool from skill: {name}\n{description}\n\nSteps:\n{steps_formatted}\n\n"
+        f"Tools needed: {', '.join(skill['tools_needed'])}"
+    )
+    values = {
+        "__DOC__": json.dumps(doc),
+        "__FUNC__": re.sub(r"[^a-z0-9_]", "_", name.lower()),
+        "__NAME__": name,
+        "__NAME_JSON__": json.dumps(name),
+        "__DESC__": description.replace("\\", " ").replace('"', "'"),
+        "__DESC_JSON__": json.dumps(description),
+        "__TOOLS__": json.dumps(skill["tools_needed"]),
+        "__STEPS__": json.dumps(skill["steps"]),
+    }
+    code = TOOL_TEMPLATE
+    # Longest keys first so __NAME_JSON__ is not clobbered by __NAME__.
+    for key in sorted(values, key=len, reverse=True):
+        code = code.replace(key, values[key])
     return code
 
 

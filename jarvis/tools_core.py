@@ -40,12 +40,25 @@ def _run_command(command: str, timeout: int = 60, policy=None, cancel_event=None
                 break
             except subprocess.TimeoutExpired:
                 if cancel_event and cancel_event.is_set():
-                    process.terminate()
-                    stdout, stderr = process.communicate(timeout=2)
+                    try:
+                        os.killpg(process.pid, 15)  # SIGTERM to process group
+                    except Exception:
+                        process.terminate()
+                    try:
+                        stdout, stderr = process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, 9)
+                        except Exception:
+                            process.kill()
+                        stdout, stderr = process.communicate()
                     return {"cancelled": True, "returncode": process.returncode,
                             "stdout": stdout[-6000:], "stderr": stderr[-3000:]}
                 if time.monotonic() - started >= timeout:
-                    process.kill()
+                    try:
+                        os.killpg(process.pid, 9)
+                    except Exception:
+                        process.kill()
                     stdout, stderr = process.communicate()
                     return {"error": f"Command timed out after {timeout}s", "timed_out": True,
                             "stdout": stdout[-6000:], "stderr": stderr[-3000:]}
@@ -79,8 +92,14 @@ def _write_file(file_path: str, content: str, append: bool = False, policy=None)
     else:
         path = Path(os.path.expanduser(file_path))
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a" if append else "w", encoding="utf-8") as f:
-        f.write(content)
+    if append:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(content)
+    else:
+        # Atomic write to avoid half-written files on crash
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(path)
     return {"written": str(path), "bytes": len(content.encode())}
 
 
@@ -177,6 +196,23 @@ def build_registry(mind=None, config=None):
     # From turbomcp: read_file, calculate, get_current_time, get_system_info,
     # internet_search, webpage_scrape (the web ones need the [web] extra).
     registry.register_default(all=True)
+    # Guard default file/network tools with the same capability policy
+    if "read_file" in registry.tools:
+        def _guarded_read_file(file_path: str):
+            """Read a file (policy-guarded)."""
+            err, p = policy.check_path(file_path)
+            if err:
+                return {"error": err, "blocked": True}
+            try:
+                return Path(p).read_text(encoding="utf-8")[:12000]
+            except Exception as e:
+                return {"error": str(e)}
+        # Replace the default implementation while keeping its schema
+        try:
+            registry.unregister("read_file")
+        except Exception:
+            pass
+        registry.register(_guarded_read_file, name="read_file", description="Read a text file (guarded by allowed roots).")
     registry._jarvis_policy = policy
     registry._cancel_event = None
     if mind is not None:

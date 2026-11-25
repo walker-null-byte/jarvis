@@ -1,7 +1,6 @@
 """Phase 3 tests: consolidation logic with a stubbed LLM. Run: python tests/test_consolidate.py"""
 
 import json
-import os
 import sys
 import tempfile
 from pathlib import Path

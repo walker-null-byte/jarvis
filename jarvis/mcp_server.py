@@ -4,7 +4,6 @@ Exposes the full turbomcp registry (core + mind + learned tools) to any
 MCP-compatible client (Claude Code, Claude Desktop, etc.) via stdin/stdout.
 """
 
-import sys
 from turbomcp.mcp_stdio import serve_stdio
 from jarvis.registry import get_registry
 

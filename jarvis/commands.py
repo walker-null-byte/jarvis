@@ -13,34 +13,10 @@ from .config import (
     save_runtime_overrides,
 )
 from .llm import LLM
+from .providers import PRESETS
 
-PROVIDER_PRESETS = {
-    "lmstudio": {
-        "base_url": "http://localhost:1234/v1",
-        "api_key_env": "JARVIS_API_KEY",
-        "description": "LM Studio local OpenAI-compatible server",
-    },
-    "ollama": {
-        "base_url": "http://localhost:11434/v1",
-        "api_key_env": "JARVIS_API_KEY",
-        "description": "Ollama OpenAI-compatible endpoint",
-    },
-    "llama.cpp": {
-        "base_url": "http://localhost:8080/v1",
-        "api_key_env": "JARVIS_API_KEY",
-        "description": "llama.cpp server endpoint",
-    },
-    "openai": {
-        "base_url": "https://api.openai.com/v1",
-        "api_key_env": "OPENAI_API_KEY",
-        "description": "OpenAI API",
-    },
-    "gemini": {
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "api_key_env": "GEMINI_API_KEY",
-        "description": "Google Gemini OpenAI-compatible endpoint",
-    },
-}
+# Presets are pure data in jarvis/providers; re-exported for ui.py.
+PROVIDER_PRESETS = PRESETS
 
 
 SETTING_PATHS = (
@@ -56,10 +32,11 @@ SETTING_PATHS = (
     "agent.max_tool_rounds",
     "agent.history_char_limit",
     "agent.keep_recent",
+    "agent.tool_mode",
+    "agent.character",
     "voice.enabled",
     "voice.engine",
     "voice.model",
-    "voice.kokoro_model",
     "voice.kokoro_voice",
     "voice.stt_model",
     "voice.stt_device",
@@ -78,7 +55,11 @@ SETTING_PATHS = (
 SLASH_COMMANDS = (
     ("help", "Show slash command help"),
     ("model", "Show or change the active model"),
-    ("provider", "List or switch OpenAI-compatible providers"),
+    ("provider", "List or switch LLM providers"),
+    ("login", "Sign in with ChatGPT (uses your Plus/Pro plan)"),
+    ("logout", "Sign out of ChatGPT"),
+    ("character", "Switch or import a character card"),
+    ("voice", "Voice output: auto-speak, engine, model downloads"),
     ("settings", "Inspect or change runtime settings"),
     ("status", "Show active provider, model, and voice status"),
 )
@@ -93,6 +74,29 @@ SLASH_SUBCOMMANDS = {
         ("set", "Configure a custom endpoint"),
         ("test", "Test the connection to an endpoint"),
         ("models", "List models an endpoint exposes"),
+    ),
+    "login": (
+        ("chatgpt", "Sign in with your ChatGPT plan"),
+    ),
+    "logout": (
+        ("chatgpt", "Sign out and revoke the ChatGPT token"),
+    ),
+    "character": (
+        ("list", "List character cards"),
+        ("use", "Switch the active character"),
+        ("show", "Show a character card"),
+        ("import", "Import a card (PNG/JSON)"),
+        ("delete", "Delete an imported card"),
+        ("export", "Export a card as SillyTavern JSON"),
+        ("reset", "Reset an edited built-in card"),
+    ),
+    "voice": (
+        ("status", "Show voice engine and readiness"),
+        ("on", "Speak every reply aloud"),
+        ("off", "Stop speaking replies (default)"),
+        ("engine", "Choose piper or kokoro"),
+        ("models", "List downloadable voice/STT/embedding models"),
+        ("download", "Download a model by id"),
     ),
     "settings": (
         ("get", "Read one setting"),
@@ -298,8 +302,13 @@ def _settings_reset_dialog(jarvis):
     }
 
 
-def handle_slash_command(jarvis, text):
-    """Handle one slash command, returning output or ``None`` for normal chat."""
+def handle_slash_command(jarvis, text, blocking=False):
+    """Handle one slash command, returning output or ``None`` for normal chat.
+
+    *blocking* only matters for ``/login chatgpt``: False (default, safe for
+    the TUI/web event loop) returns the sign-in URL immediately; True waits up
+    to 300 s for the browser sign-in to finish (plain CLI use).
+    """
     if not text.lstrip().startswith("/"):
         return None
     try:
@@ -321,6 +330,16 @@ def handle_slash_command(jarvis, text):
             return _settings(jarvis, args)
         if command in {"status", "info"}:
             return _status(jarvis)
+        if command == "login":
+            return _login(jarvis, args, blocking)
+        if command == "logout":
+            return _logout(jarvis, args)
+        if command == "character":
+            from .characters import handle_command
+            return handle_command(jarvis, " ".join(args))
+        if command == "voice":
+            from .voice import handle_voice_command
+            return handle_voice_command(jarvis, " ".join(args))
         return f"Unknown command: /{command}. Type /help for available commands."
     except (OSError, ValueError, RuntimeError) as error:
         return f"Command failed: {error}"
@@ -343,7 +362,11 @@ def _help():
 /settings set SECTION.KEY VALUE       Change one setting for this session
 /settings reset SECTION.KEY           Restore its default
 /settings save                        Persist current slash settings
-/status                               Show active model/provider/voice status
+/login chatgpt                        Sign in with your ChatGPT Plus/Pro plan
+/logout chatgpt                       Sign out of ChatGPT
+/character list|use|show|import|delete|export|reset  Manage character cards
+/voice status|on|off|engine|models|download     Voice output and model downloads
+/status                               Show provider, backend, model and voice status
 /help                                 Show this help
 
 Settings changes apply immediately. They are session-local until `/settings save`.
@@ -357,11 +380,14 @@ def _model(jarvis, args):
         args = args[1:]
     if args and args[0].lower() == "list":
         ok, message, ids, _ = _test_connection(jarvis)
-        if not ok:
-            return f"Could not list models: {message}"
         if not ids:
+            if not ok:
+                return f"Could not list models: {message}"
             return "The endpoint reports no models."
-        return "Models:\n" + "\n".join(ids)
+        # If we got ids, show them even when ok is False (model mismatch case)
+        # but surface the warning so the user knows why ok is False.
+        header = "Models:\n" if ok else f"Models (warning: {message}):\n"
+        return header + "\n".join(ids)
     if not args:
         return f"Model: {jarvis.config['llm']['model']}"
     model = args[0].strip()
@@ -375,8 +401,8 @@ def _model(jarvis, args):
         jarvis.config["llm"].get("provider", "custom"),
         model,
     )
-    save_runtime_overrides(jarvis.config, SETTING_PATHS)
-    return f"Model changed to: {model}"
+    save_runtime_overrides(jarvis.config, ["llm.model", "llm.provider"])
+    return f"Model changed to: {model} (saved to {runtime_config_path(jarvis.config)})"
 
 
 def _provider(jarvis, args):
@@ -437,10 +463,21 @@ def _provider(jarvis, args):
     # Restore this provider's own last-used model instead of carrying a
     # foreign model over (the classic "works elsewhere but 404s here" error).
     remembered = remembered_model(jarvis.config, provider)
+    default_model = PROVIDER_PRESETS.get(provider, {}).get("default_model")
+    if not remembered and default_model:
+        remembered = default_model
     if remembered:
         jarvis.config["llm"]["model"] = remembered
         jarvis.llm.reconfigure(jarvis.config)
         jarvis._emit("config_changed", section="llm", key="model")
+
+    if provider == "chatgpt":
+        from .providers.chatgpt_auth import get_chatgpt_auth
+        save_runtime_overrides(jarvis.config, ["llm.provider", "llm.base_url", "llm.api_key_env", "llm.model"])
+        summary = f"Provider changed to chatgpt (Sign in with ChatGPT)\nModel: {jarvis.config['llm']['model']}"
+        if get_chatgpt_auth(jarvis.config).status()["signed_in"]:
+            return summary + "\nSigned in. Use /model list to see available models."
+        return summary + "\nNot signed in yet: run /login chatgpt (needs ChatGPT Plus or Pro)."
 
     summary = (
         f"Provider changed to {provider}: {jarvis.config['llm']['base_url']}\n"
@@ -463,8 +500,10 @@ def _provider(jarvis, args):
                 f"Model: {jarvis.config['llm']['model']}"
             )
         summary += f"\nConnection test: OK — {message}"
-    save_runtime_overrides(jarvis.config, SETTING_PATHS)
-    summary += f"\nSettings saved to {runtime_config_path(jarvis.config)}"
+    # Only persist provider-relevant keys; don't snapshot unrelated settings
+    # that may be session-local (e.g. llm.timeout set but not yet saved).
+    save_runtime_overrides(jarvis.config, ["llm.provider", "llm.base_url", "llm.api_key_env", "llm.model"])
+    summary += f"\nSettings saved to {runtime_config_path(jarvis.config)} (provider + model)"
     return summary
 
 
@@ -476,7 +515,7 @@ def _provider_test(jarvis, args):
             return f"Unknown provider preset: {name}. Use /provider list."
         preset = PROVIDER_PRESETS[name]
         ok, message, _ids, _ = _test_connection(
-            jarvis, base_url=preset["base_url"], api_key_env=preset["api_key_env"]
+            jarvis, base_url=preset["base_url"], api_key_env=preset["api_key_env"], provider=name
         )
         label = f"{name} ({preset['base_url']})"
     else:
@@ -491,7 +530,7 @@ def _provider_models(jarvis, args):
             return f"Unknown provider preset: {name}. Use /provider list."
         preset = PROVIDER_PRESETS[name]
         ok, message, ids, _ = _test_connection(
-            jarvis, base_url=preset["base_url"], api_key_env=preset["api_key_env"]
+            jarvis, base_url=preset["base_url"], api_key_env=preset["api_key_env"], provider=name
         )
     else:
         ok, message, ids, _ = _test_connection(jarvis)
@@ -500,6 +539,40 @@ def _provider_models(jarvis, args):
     if not ids:
         return "The endpoint reports no models."
     return "Models:\n" + "\n".join(ids)
+
+
+def _login(jarvis, args, blocking=False):
+    """``/login chatgpt``: start the browser sign-in (see handle_slash_command)."""
+    if not args or args[0].lower() != "chatgpt":
+        return "Usage: /login chatgpt"
+    from .providers.chatgpt_auth import get_chatgpt_auth
+    auth = get_chatgpt_auth(jarvis.config)
+    info = auth.start_login(open_browser=True)
+    lines = ["Opening your browser to sign in with ChatGPT.", f"If it did not open, visit:\n{info['auth_url']}"]
+    if not blocking:
+        lines.append("Finish in the browser, then run /status to confirm.")
+        return "\n".join(lines)
+    print("\n".join(lines), flush=True)
+    status = auth.wait(timeout=300)
+    if status["signed_in"] and status["plan_ok"]:
+        return f"Signed in to ChatGPT as {status['email'] or 'your account'}. Use /provider use chatgpt to switch."
+    return f"ChatGPT sign-in did not complete: {status['error'] or 'timed out'}"
+
+
+def _logout(jarvis, args):
+    if not args or args[0].lower() != "chatgpt":
+        return "Usage: /logout chatgpt"
+    from .providers.chatgpt_auth import get_chatgpt_auth
+    get_chatgpt_auth(jarvis.config).logout()
+    return "Signed out of ChatGPT."
+
+
+def _provider_for_url(base_url):
+    """Non-chat preset (e.g. anthropic) whose URL matches, so probes use its backend."""
+    for name, preset in PROVIDER_PRESETS.items():
+        if preset["backend"] == "anthropic" and preset["base_url"] == base_url:
+            return name
+    return None
 
 
 def _split_credentials(raw):
@@ -516,7 +589,7 @@ def _split_credentials(raw):
     return None, raw
 
 
-def _test_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True):
+def _test_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True, provider=None):
     """Probe an endpoint and return ``(ok, message, model_ids, working_url)``.
 
     Probes the live client unless *base_url* (and optionally credentials)
@@ -529,27 +602,46 @@ def _test_connection(jarvis, base_url=None, api_key_env=None, api_key=None, time
     """
     working_url = base_url or jarvis.config["llm"]["base_url"]
     probe = jarvis.llm
-    if base_url is not None or api_key_env or api_key:
+    if provider is None and base_url is not None:
+        provider = _provider_for_url(base_url)
+    if base_url is not None or api_key_env or api_key or provider:
         probe_config = copy.deepcopy(jarvis.config)
+        if provider:
+            probe_config["llm"]["provider"] = provider
         if base_url is not None:
             probe_config["llm"]["base_url"] = base_url
         if api_key_env:
             probe_config["llm"]["api_key_env"] = api_key_env
+            # Preset probe uses env var — clear any stale session-local literal
+            # so literal doesn't win over env (LLM._resolve_key prefers literal)
+            if not api_key:
+                probe_config["llm"]["api_key"] = None
         if api_key:
             probe_config["llm"]["api_key"] = api_key
+            # Literal probe (custom /provider set URL KEY) — clear env var
+            # when caller supplied a literal but no env, to force literal use.
+            if not api_key_env:
+                probe_config["llm"]["api_key_env"] = None
         probe = LLM(probe_config)
     probe_kwargs = {"timeout": timeout}
     if not check_model:
         probe_kwargs["check_model"] = False
     ok, message, ids, status = probe.probe(**probe_kwargs)
-    if not ok and status == 404 and not ids and not working_url.rstrip("/").endswith("/v1"):
+    if (not ok and status == 404 and not ids and getattr(probe, "backend", "chat") == "chat"
+            and not working_url.rstrip("/").endswith("/v1")):
         candidate = working_url.rstrip("/") + "/v1"
         probe_config = copy.deepcopy(jarvis.config)
+        if provider:
+            probe_config["llm"]["provider"] = provider
         probe_config["llm"]["base_url"] = candidate
         if api_key_env:
             probe_config["llm"]["api_key_env"] = api_key_env
+            if not api_key:
+                probe_config["llm"]["api_key"] = None
         if api_key:
             probe_config["llm"]["api_key"] = api_key
+            if not api_key_env:
+                probe_config["llm"]["api_key_env"] = None
         retry_ok, retry_message, retry_ids, _ = LLM(probe_config).probe(**probe_kwargs)
         if retry_ok:
             return True, retry_message, retry_ids, candidate
@@ -609,10 +701,18 @@ def _write_setting(jarvis, path, raw):
     section, key = path.split(".", 1)
     current = jarvis.config[section].get(key)
     value = _coerce(raw, current)
+    if path == "agent.tool_mode" and value not in ("search", "all"):
+        return "agent.tool_mode must be 'search' or 'all'"
+    if path == "agent.character":
+        # Default for new sessions; /character use switches the current one.
+        if not jarvis.store_characters.get(str(value)):
+            return f"Unknown character: {value}. Use /character list."
     if path == "llm.provider":
         value = value.lower()
         if value not in set(PROVIDER_PRESETS) | {"custom"}:
             return f"Unsupported provider: {value}. Use /provider list."
+        previous_provider = jarvis.config["llm"].get("provider", "custom")
+        remember_model(jarvis.config, previous_provider, jarvis.config["llm"].get("model", ""))
         if value in PROVIDER_PRESETS:
             preset = PROVIDER_PRESETS[value]
             jarvis.config["llm"].update({
@@ -620,6 +720,18 @@ def _write_setting(jarvis, path, raw):
                 "api_key_env": preset["api_key_env"],
                 "api_key": None,
             })
+            jarvis.config["llm"]["provider"] = value
+            # Restore per-provider model like _provider does
+            remembered = remembered_model(jarvis.config, value)
+            if remembered:
+                jarvis.config["llm"]["model"] = remembered
+            _apply_runtime_change(jarvis, path)
+            # Ensure model change is reflected in LLM client as well
+            jarvis.llm.reconfigure(jarvis.config)
+            if remembered:
+                jarvis._emit("config_changed", section="llm", key="model")
+            return f"Set provider to {value}: {jarvis.config['llm']['base_url']} (model: {jarvis.config['llm']['model']})"
+        else:
             jarvis.config["llm"]["provider"] = value
             _apply_runtime_change(jarvis, path)
             return f"Set provider to {value}: {jarvis.config['llm']['base_url']}"
@@ -686,8 +798,10 @@ def _status(jarvis):
         key_line = f"API key: env {llm['api_key_env']}"
     else:
         key_line = "API key: not set"
+    backend = getattr(jarvis.llm, "backend", "chat")
     lines = [
         f"Provider: {llm.get('provider', 'custom')}",
+        f"Backend: {backend}",
         f"Endpoint: {llm.get('base_url')}",
         f"Model: {llm.get('model')}",
         key_line,
@@ -695,6 +809,11 @@ def _status(jarvis):
         f"Voice: {'on' if voice.get('enabled') else 'off'} ({voice.get('engine', 'none')})",
         f"Session: {jarvis.session_id}",
     ]
+    if backend == "chatgpt":
+        from .providers.chatgpt_auth import get_chatgpt_auth
+        st = get_chatgpt_auth(jarvis.config).status()
+        who = st["email"] or "signed in" if st["signed_in"] else "not signed in (run /login chatgpt)"
+        lines.append(f"ChatGPT: {who}")
     if getattr(jarvis.llm, "last_error", None):
         lines.append(f"Last error: {jarvis.llm.last_error}")
     lines.append("Run /provider test to verify the connection")

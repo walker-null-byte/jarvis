@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis"
-version = "0.1.0"
+version = "1.1.0"
 description = "A lightweight local-first terminal AI assistant and OpenAI-compatible Hermes alternative"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,41 +25,37 @@ classifiers = [
 ]
 
 dependencies = [
+    # Core agent + providers
     "openai>=1.0.0",
-    "textual>=0.50.0",
-    "piper-tts>=1.2.0",
-    "faster-whisper>=1.0.0",
-    "sounddevice>=0.4.6",
+    "anthropic>=2.0.0",
+    "httpx>=0.27.0",
+    "turbomcp>=0.2.0",
     "numpy>=1.26.0",
     "tomli>=2.0; python_version < '3.11'",
-    "turbomcp>=0.2.0",
-]
-
-[project.optional-dependencies]
-voice = [
-    "kokoro>=0.7.0",
-]
-web = [
+    # Interfaces: terminal UI + web UI
+    "textual>=0.50.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    # Web tools (search / scrape)
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
     "ddgs>=0.3.0",
     "googlesearch-python>=1.2.0",
-]
-semantic = [
+    # Semantic tool search + memory
     "model2vec>=0.1.0",
+    # Voice: Piper TTS + faster-whisper STT. Voice *models* are not bundled;
+    # they download on demand from the UI. Kokoro (kokoro-onnx) is an optional
+    # one-click install from the UI as well.
+    "piper-tts>=1.2.0",
+    "faster-whisper>=1.0.0",
+    "sounddevice>=0.4.6",
 ]
+
+[project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
-]
-all = [
-    "kokoro>=0.7.0",
-    "requests>=2.31.0",
-    "beautifulsoup4>=4.12.0",
-    "ddgs>=0.3.0",
-    "googlesearch-python>=1.2.0",
-    "model2vec>=0.1.0",
 ]
 
 [project.scripts]
@@ -76,6 +72,8 @@ include = ["jarvis*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.toml"]
+"jarvis.webui" = ["static/*", "static/**/*"]
+"jarvis" = ["characters_builtin/*.json"]
 
 [tool.ruff]
 line-length = 100

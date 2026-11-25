@@ -4,9 +4,7 @@ import importlib
 import importlib.util
 import os
 import threading
-from pathlib import Path
 
-from turbomcp import TurboMCP
 
 from .config import load_config, mind_dir
 from .tools_core import build_registry
@@ -47,20 +45,32 @@ class ToolRegistry:
             self._load_tool_file(tool_path)
 
     def _load_tool_file(self, tool_path):
-        """Load a single tool module and register its register() function."""
+        """Load a single tool module and register its register() function.
+
+        Exec is done outside the lock; only the final register step is
+        guarded. Prevents blocking callers while arbitrary tool code runs.
+        """
         name = tool_path.stem
         try:
             mtime = tool_path.stat().st_mtime
-            if name in self._loaded_tools and self._loaded_tools[name] == mtime:
-                return  # unchanged
+            with self._lock:
+                if name in self._loaded_tools and self._loaded_tools[name] == mtime:
+                    return  # unchanged
 
             spec = importlib.util.spec_from_file_location(name, tool_path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
             if hasattr(module, "register"):
-                module.register(self._registry)
-                self._loaded_tools[name] = mtime
+                with self._lock:
+                    # Re-check after exec in case watcher removed it
+                    if name in self._loaded_tools and self._loaded_tools[name] == mtime:
+                        return
+                    # Unregister previous version if exists
+                    if name in self._loaded_tools:
+                        self._unload_tool(name)
+                    module.register(self._registry)
+                    self._loaded_tools[name] = mtime
         except Exception as e:
             print(f"[registry] Failed to load {tool_path.name}: {e}", file=os.sys.stderr)
 
@@ -99,7 +109,9 @@ class ToolRegistry:
 
     def call(self, name, arguments=None):
         arguments = arguments or {}
-        tool = self._registry.tools.get(name)
+        # Copy tool reference under lock to avoid race with watcher
+        with self._lock:
+            tool = self._registry.tools.get(name)
         if tool:
             error = validate_arguments(tool.get("input_schema", {}), arguments)
             if error:
@@ -117,6 +129,15 @@ class ToolRegistry:
 
     def to_mcp_tools(self, names=None):
         return self._registry.to_mcp_tools(names)
+
+    def tool_names(self):
+        with self._lock:
+            return list(self._registry.tools)
+
+    def enable_semantic_search(self):
+        """Enable embedding search once; callers should catch failures."""
+        if not self._registry.semantic_enabled:
+            self._registry.enable_semantic_search()
 
     def search_tools(self, query, top_n=5, alpha=0.5, threshold=0.15):
         return self._registry.search_tools(query, top_n, alpha, threshold)
@@ -140,10 +161,10 @@ class ToolRegistry:
                         removed = set(last_mtimes) - set(current)
                         modified = {n for n in current if n in last_mtimes and current[n] != last_mtimes[n]}
 
+                        for name in added | modified:
+                            path = self.tools_dir / f"{name}.py"
+                            self._load_tool_file(path)
                         with self._lock:
-                            for name in added | modified:
-                                path = self.tools_dir / f"{name}.py"
-                                self._load_tool_file(path)
                             for name in removed:
                                 self._unload_tool(name)
 
@@ -170,18 +191,20 @@ class ToolRegistry:
 # Global registries (lazy-initialized per mind directory). Keeping one registry
 # per mind avoids cross-test/config contamination while retaining hot reload.
 _registries = {}
+_registries_lock = threading.Lock()
 
 
 def get_registry(config=None):
     """Get or create the global ToolRegistry."""
     cfg = config or load_config()
     key = str(mind_dir(cfg).resolve())
-    if key not in _registries:
-        registry = ToolRegistry(cfg)
-        registry._load_tools_dir()
-        registry.start_watcher()
-        _registries[key] = registry
-    return _registries[key]
+    with _registries_lock:
+        if key not in _registries:
+            registry = ToolRegistry(cfg)
+            registry._load_tools_dir()
+            registry.start_watcher()
+            _registries[key] = registry
+        return _registries[key]
 
 
 def reload_tools():

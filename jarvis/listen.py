@@ -1,9 +1,12 @@
 """STT — push-to-talk using faster-whisper."""
 
 import threading
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore
 
-from jarvis.models_manager import ModelManager
+from jarvis.models_manager import ModelManager, models_dir
 
 
 class Listener:
@@ -18,8 +21,7 @@ class Listener:
         self.language = voice_cfg.get("stt_language")
         self.sample_rate = 16000
 
-        models_dir = config["paths"].get("models") or "models"
-        self.models = ModelManager(models_dir)
+        self.models = ModelManager(models_dir(config))
         self._model = None
         self._recording = False
         self._audio_chunks = []
@@ -30,7 +32,9 @@ class Listener:
         if self._model is None:
             model_dir = self.models.ensure_whisper(self.model_name)
             if not model_dir:
-                raise RuntimeError(f"Whisper model {self.model_name} not available")
+                raise RuntimeError(
+                    f"Whisper model {self.model_name} is not downloaded; "
+                    f"run /voice download whisper:{self.model_name} or use the Models panel")
             from faster_whisper import WhisperModel
             self._model = WhisperModel(model_dir, device=self.device, compute_type=self.compute_type)
 
@@ -83,6 +87,8 @@ class Listener:
         with self._lock:
             chunks = list(self._audio_chunks)
         if not chunks:
+            return ""
+        if np is None:
             return ""
 
         audio = np.concatenate(chunks, axis=0).flatten()

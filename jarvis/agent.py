@@ -8,6 +8,7 @@ import threading
 
 from .approvals import ApprovalManager
 from .audit import AuditLog
+from .characters import CharacterStore
 from .config import load_config
 from .context import build_system_prompt, ensure_mind
 from .events import Event, EventBus, new_id
@@ -16,9 +17,11 @@ from .memory import EpisodeLog
 from .redaction import redact_text, redact_value
 from .registry import get_registry
 from .sessions import SessionStore
+from .tool_exposure import ToolExposure, enable_semantic_search
 from .voice import get_voice
 
 MAX_TOOL_RESULT_CHARS = 8000
+SUMMARY_PREFIX = "[Summary of the earlier conversation]"
 
 SUMMARIZE_PROMPT = """\
 Compress this conversation transcript into compact bullet points. Preserve
@@ -46,85 +49,202 @@ class Jarvis:
         self.registry.set_cancel_event(self._cancel_event)
         self.approvals.set_cancel_event(self._cancel_event)
         self.sessions = SessionStore(self.mind)
-        self.session_id = session_id or self.sessions.create()
-        self.history = self.sessions.load(self.session_id) if session_id else []
+        self.store_characters = CharacterStore(self.mind)
+        self.character = self.config["agent"]["character"]
+        if session_id:
+            self.session_id = session_id
+            self.history = self.sessions.load(session_id)
+            self.character = self._stored_character(session_id)
+        else:
+            self.session_id = self.sessions.create(character=self.character)
+            self.history = []
+        enable_semantic_search(self.registry, self.config)
+        self.exposure = ToolExposure(self.registry, self.config, self.mind)
         self.voice = get_voice(self.config)
         self._active_turn = ""
         self._emit("session_started", session_id=self.session_id)
         self.audit.log("session", self.session_id, action="session_started", status="ok")
 
-    def ask(self, user_text, on_text=None, on_tool=None, on_tool_result=None):
+    @property
+    def busy(self):
+        """True while a turn is running."""
+        return bool(self._active_turn)
+
+    def _stored_character(self, session_id):
+        """The session's saved card id, or 'jarvis' if it no longer exists."""
+        card_id = self.sessions.get_character(session_id) or self.config["agent"]["character"]
+        return card_id if self.store_characters.get(card_id) else "jarvis"
+
+    def set_character(self, card_id):
+        """Switch this session's persona. Returns {"character": summary} or {"error": ...}."""
+        if not self.store_characters.get(card_id):
+            return {"error": f"Unknown character: {card_id}"}
+        self.character = card_id
+        self.sessions.set_character(self.session_id, card_id)
+        summary = next((c for c in self.store_characters.list() if c["id"] == card_id), {"id": card_id})
+        self._emit("character_changed", character=summary)
+        return {"character": summary}
+
+    def _build_prompt(self):
+        return build_system_prompt(
+            self.mind,
+            character=self.store_characters.get(self.character),
+            tools_section=self.exposure.prompt_section(),
+            memory_chars=self.config["agent"]["memory_index_chars"],
+        )
+
+    def ask(self, user_text, on_text=None, on_tool=None, on_tool_result=None, on_reasoning=None):
         """Run one full turn. Returns the final reply text.
 
         on_text(token) streams reply fragments; on_tool(name, args) fires
         before each tool execution.
         """
         self._cancel_event.clear()
-        self._maybe_summarize()
-        turn_id = new_id("turn")
-        self._active_turn = turn_id
-        self._emit("turn_started", turn_id=turn_id)
-        self.audit.log("turn", self.session_id, turn_id, "turn_started", "running", {"content": user_text})
+        try:
+            self._maybe_summarize()
+        except Exception as e:
+            # Summarization is best-effort; never abort the user turn.
+            self._emit("error", message=f"Summarization failed: {e}")
+        turn_id = self._begin_turn(user_text)
         self.episodes.log("user", user_text)
         user_message = {"role": "user", "content": user_text}
         self.history.append(user_message)
         self.sessions.append(self.session_id, user_message)
         self._emit("user_message", turn_id=turn_id, content=user_text)
-        tools = self.registry.to_openai_tools()
+        return self._run_turn(turn_id, on_text, on_tool, on_tool_result, on_reasoning)
 
-        for _ in range(self.config["agent"]["max_tool_rounds"]):
-            if self._cancel_event.is_set():
-                return self._finish_cancelled(turn_id)
-            messages = [{"role": "system", "content": build_system_prompt(self.mind)}]
+    def _begin_turn(self, user_text):
+        turn_id = new_id("turn")
+        self._active_turn = turn_id
+        self._emit("turn_started", turn_id=turn_id)
+        self.audit.log("turn", self.session_id, turn_id, "turn_started", "running", {"content": user_text})
+        return turn_id
+
+    def _run_turn(self, turn_id, on_text=None, on_tool=None, on_tool_result=None, on_reasoning=None):
+        """The model/tool loop for a turn whose user message is already last in history."""
+        # Tools and system prompt are fixed for the whole turn (cache stability).
+        self.exposure.refresh()
+        tools = self.exposure.tools()
+        system_prompt = self._build_prompt()
+        def emit_reasoning(token):
+            self._emit("assistant_reasoning_delta", turn_id=turn_id, content=token)
+            if on_reasoning:
+                on_reasoning(token)
+
+        try:
+            for _ in range(self.config["agent"]["max_tool_rounds"]):
+                if self._cancel_event.is_set():
+                    return self._finish_cancelled(turn_id)
+                messages = [{"role": "system", "content": system_prompt}]
+                messages += self.history
+                def emit_text(token):
+                    self._emit("assistant_delta", turn_id=turn_id, content=token)
+                    if on_text:
+                        on_text(token)
+
+                msg = self._chat_turn(messages, turn_id, tools=tools, on_text=emit_text, on_reasoning=emit_reasoning)
+                self.history.append(msg)
+                self.sessions.append(self.session_id, msg)
+
+                calls = msg.get("tool_calls")
+                if not calls:
+                    reply = msg.get("content") or ""
+                    self.episodes.log("jarvis", reply)
+                    self._emit("assistant_message", turn_id=turn_id, content=reply)
+                    self._emit("turn_finished", turn_id=turn_id, status="ok")
+                    self.audit.log("turn", self.session_id, turn_id, "turn_finished", "ok")
+                    self._active_turn = ""
+                    return reply
+
+                for call in calls:
+                    tool_message = self._run_tool(call, on_tool, on_tool_result, turn_id)
+                    self.history.append(tool_message)
+                    self.sessions.append(self.session_id, tool_message)
+                    if self._cancel_event.is_set():
+                        return self._finish_cancelled(turn_id)
+
+            # Tool budget exhausted: ask for a wrap-up without tools.
+            messages = [{"role": "system", "content": system_prompt}]
             messages += self.history
-            def emit_text(token):
+            messages.append({
+                "role": "user",
+                "content": "(Tool budget for this turn is exhausted — summarize where things stand.)",
+            })
+            def emit_wrapup(token):
                 self._emit("assistant_delta", turn_id=turn_id, content=token)
                 if on_text:
                     on_text(token)
 
-            msg = self._chat_turn(messages, turn_id, tools=tools, on_text=emit_text)
+            # Same tools array as every other round: some APIs reject a history
+            # containing tool calls when no tools are declared, and changing it
+            # would break prompt caching. Calls made here are dropped unanswered.
+            msg = self._chat_turn(messages, turn_id, tools=tools, on_text=emit_wrapup, on_reasoning=emit_reasoning)
+            msg.pop("tool_calls", None)
+            msg.pop("provider_state", None)
             self.history.append(msg)
             self.sessions.append(self.session_id, msg)
+            reply = msg.get("content") or ""
+            self.episodes.log("jarvis", reply)
+            self._emit("assistant_message", turn_id=turn_id, content=reply)
+            self._emit("turn_finished", turn_id=turn_id, status="budget_exhausted")
+            self.audit.log("turn", self.session_id, turn_id, "turn_finished", "budget_exhausted")
+            self._active_turn = ""
+            return reply
+        except Exception:
+            self._active_turn = ""
+            raise
 
-            calls = msg.get("tool_calls")
-            if not calls:
-                reply = msg.get("content") or ""
-                self.episodes.log("jarvis", reply)
-                self._emit("assistant_message", turn_id=turn_id, content=reply)
-                self._emit("turn_finished", turn_id=turn_id, status="ok")
-                self.audit.log("turn", self.session_id, turn_id, "turn_finished", "ok")
-                self._active_turn = ""
-                return reply
+    # ---------- history editing ----------
 
-            for call in calls:
-                tool_message = self._run_tool(call, on_tool, on_tool_result, turn_id)
-                self.history.append(tool_message)
-                self.sessions.append(self.session_id, tool_message)
-                if self._cancel_event.is_set():
-                    return self._finish_cancelled(turn_id)
+    def _drop_tail(self, count):
+        """Drop the last `count` messages from memory and the session JSONL.
 
-        # Tool budget exhausted: ask for a wrap-up without tools.
-        messages = [{"role": "system", "content": build_system_prompt(self.mind)}]
-        messages += self.history
-        messages.append({
-            "role": "user",
-            "content": "(Tool budget for this turn is exhausted — summarize where things stand.)",
-        })
-        def emit_wrapup(token):
-            self._emit("assistant_delta", turn_id=turn_id, content=token)
-            if on_text:
-                on_text(token)
+        After summarization self.history is no longer a prefix-match of the
+        JSONL, but its tail still equals the JSONL tail, so cutting `count`
+        from the end of both keeps them consistent.
+        """
+        if count > 0:
+            del self.history[-count:]
+            self.sessions.truncate_tail(self.session_id, count)
+        self._emit("history_truncated", length=len(self.history))
 
-        msg = self._chat_turn(messages, turn_id, on_text=emit_wrapup)
-        self.history.append(msg)
-        self.sessions.append(self.session_id, msg)
-        reply = msg.get("content") or ""
-        self.episodes.log("jarvis", reply)
-        self._emit("assistant_message", turn_id=turn_id, content=reply)
-        self._emit("turn_finished", turn_id=turn_id, status="budget_exhausted")
-        self.audit.log("turn", self.session_id, turn_id, "turn_finished", "budget_exhausted")
-        self._active_turn = ""
-        return reply
+    def edit_message(self, index, new_text, on_text=None, on_tool=None, on_tool_result=None,
+                     on_reasoning=None):
+        """Replace the user message at history[index] and rerun from there.
+
+        Drops that message and everything after it, then asks new_text as a
+        normal turn. Raises ValueError for a bad index or a non-user message,
+        RuntimeError("busy") while a turn runs.
+        """
+        if self._active_turn:
+            raise RuntimeError("busy")
+        new_text = (new_text or "").strip()
+        if not new_text:
+            raise ValueError("message is empty")
+        if not isinstance(index, int) or not 0 <= index < len(self.history):
+            raise ValueError("no such message")
+        message = self.history[index]
+        if message.get("role") != "user" or (message.get("content") or "").startswith(SUMMARY_PREFIX):
+            raise ValueError("only your own messages can be edited")
+        self._drop_tail(len(self.history) - index)
+        return self.ask(new_text, on_text, on_tool, on_tool_result, on_reasoning)
+
+    def regenerate(self, on_text=None, on_tool=None, on_tool_result=None, on_reasoning=None):
+        """Redo the reply to the last user message (it is not appended again)."""
+        if self._active_turn:
+            raise RuntimeError("busy")
+        index = next(
+            (i for i in range(len(self.history) - 1, -1, -1)
+             if self.history[i].get("role") == "user"
+             and not (self.history[i].get("content") or "").startswith(SUMMARY_PREFIX)),
+            None,
+        )
+        if index is None:
+            raise ValueError("nothing to regenerate")
+        self._cancel_event.clear()
+        self._drop_tail(len(self.history) - index - 1)
+        turn_id = self._begin_turn(self.history[index].get("content") or "")
+        return self._run_turn(turn_id, on_text, on_tool, on_tool_result, on_reasoning)
 
     # ---------- history compression ----------
 
@@ -162,9 +282,9 @@ class Jarvis:
             return  # model gave nothing back; try again next turn
 
         self.history = [
-            {"role": "user", "content": f"[Summary of the earlier conversation]\n{summary}"},
+            {"role": "user", "content": f"{SUMMARY_PREFIX}\n{summary}"},
             {"role": "assistant", "content": "Understood — context noted."},
-        ] + recent
+        ] + [{k: v for k, v in m.items() if k != "provider_state"} for m in recent]
         self.episodes.log("summarized", f"compressed {len(old)} messages into:\n{summary}")
 
     @staticmethod
@@ -190,15 +310,22 @@ class Jarvis:
         name = call["function"]["name"]
         try:
             args = json.loads(call["function"]["arguments"] or "{}")
-        except json.JSONDecodeError:
-            args = {}
+            # Report the inner tool when the model went through call_tool.
+            name, args, via = self.exposure.unwrap(name, args)
+        except json.JSONDecodeError as e:
+            error_msg = f"Tool arguments were not valid JSON: {e}"
+            self._emit("tool_finished", turn_id=turn_id, name=name, args={}, result=error_msg)
+            self.audit.log("tool", self.session_id, turn_id, name, "error", {"error": error_msg})
+            self.episodes.log(f"tool: {name}", f"args: <invalid JSON> {call['function']['arguments'][:500]}\nresult: {error_msg}")
+            return {"role": "tool", "tool_call_id": call["id"], "content": error_msg}
         safe_args = redact_value(args)
         if on_tool:
             on_tool(name, safe_args)
-        self._emit("tool_started", turn_id=turn_id, name=name, args=safe_args)
+        extra = {"via": via} if via else {}
+        self._emit("tool_started", turn_id=turn_id, name=name, args=safe_args, **extra)
 
         try:
-            result = self.registry.call(name, args)
+            result = self.exposure.run(name, args, via)
         except Exception as e:
             result = f"Error: {e}"
 
@@ -209,7 +336,8 @@ class Jarvis:
 
         if on_tool_result:
             on_tool_result(name, redact_value(result))
-        self._emit("tool_finished", turn_id=turn_id, name=name, args=safe_args, result=result_str[:2000])
+        self._emit("tool_finished", turn_id=turn_id, name=name, args=safe_args,
+                   result=result_str[:2000], **extra)
         tool_status = "error" if (isinstance(result, dict) and result.get("error")) else "ok"
         self.audit.log(
             "tool", self.session_id, turn_id, name, tool_status,
@@ -228,9 +356,9 @@ class Jarvis:
     def _emit(self, kind, turn_id="", **data):
         self.events.emit(Event(kind, self.session_id, turn_id=turn_id, data=data))
 
-    def _chat_turn(self, messages, turn_id, tools=None, on_text=None):
+    def _chat_turn(self, messages, turn_id, tools=None, on_text=None, on_reasoning=None):
         try:
-            return self.llm.chat(messages, tools=tools, on_text=on_text)
+            return self.llm.chat(messages, tools=tools, on_text=on_text, on_reasoning=on_reasoning)
         except Exception as e:
             self._emit("error", turn_id=turn_id, message=str(e))
             self._emit("turn_finished", turn_id=turn_id, status="error")
@@ -239,6 +367,15 @@ class Jarvis:
             raise
 
     def _finish_cancelled(self, turn_id):
+        # If last assistant message had tool_calls without matching tool results, inject cancellations
+        if self.history and self.history[-1].get("tool_calls"):
+            pending = self.history[-1].get("tool_calls") or []
+            # count how many tool results already appended after that message
+            # history ends with that assistant message, so none appended
+            for call in pending:
+                tool_msg = {"role": "tool", "tool_call_id": call["id"], "content": "Cancelled."}
+                self.history.append(tool_msg)
+                self.sessions.append(self.session_id, tool_msg)
         reply = "Cancelled."
         message = {"role": "assistant", "content": reply}
         self.history.append(message)
@@ -252,7 +389,10 @@ class Jarvis:
 
     def new_session(self):
         """Start a fresh session while retaining the same runtime services."""
-        self.session_id = self.sessions.create()
+        self.character = self.config["agent"]["character"]
+        if not self.store_characters.get(self.character):
+            self.character = "jarvis"
+        self.session_id = self.sessions.create(character=self.character)
         self.history = []
         self._emit("session_started", session_id=self.session_id)
         return self.session_id
@@ -263,6 +403,7 @@ class Jarvis:
             return {"error": f"Session not found: {session_id}"}
         self.session_id = session_id
         self.history = self.sessions.load(session_id)
+        self.character = self._stored_character(session_id)
         self._emit("session_started", session_id=session_id)
         return {"session_id": session_id, "messages": len(self.history)}
 
@@ -272,11 +413,11 @@ class Jarvis:
             if message.get("role") != "user":
                 continue
             content = (message.get("content") or "").strip()
-            if content and not content.startswith("[Summary of the earlier conversation]"):
+            if content and not content.startswith(SUMMARY_PREFIX):
                 return content
         return ""
 
-    def retry_last_turn(self, on_text=None, on_tool=None, on_tool_result=None):
+    def retry_last_turn(self, on_text=None, on_tool=None, on_tool_result=None, on_reasoning=None):
         """Run the latest user request again as a new, auditable turn."""
         if self._active_turn:
             raise RuntimeError("A turn is already in progress")
@@ -288,6 +429,7 @@ class Jarvis:
             on_text=on_text,
             on_tool=on_tool,
             on_tool_result=on_tool_result,
+            on_reasoning=on_reasoning,
         )
 
     def close(self):

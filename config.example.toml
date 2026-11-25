@@ -9,6 +9,10 @@
 #   Ollama:       http://localhost:11434/v1
 #   llama.cpp:    http://localhost:8080/v1
 #   Gemini:       https://generativelanguage.googleapis.com/v1beta/openai/
+# Hosted presets (switch at runtime with /provider use <name>):
+#   openai, gemini, openrouter, groq, deepseek, mistral, xai, vllm
+#   chatgpt   — "Sign in with ChatGPT": uses your Plus/Pro plan (run /login chatgpt)
+#   anthropic — native Claude API via the official SDK (pip install 'jarvis[anthropic]')
 base_url = "http://localhost:1234/v1"
 provider = "custom"  # custom, lmstudio, ollama, llama.cpp, openai, or gemini
 model = "gemma-4"  # or whatever model your server serves
@@ -20,6 +24,9 @@ max_tokens = 4096
 timeout = 120
 retries = 2
 retry_delay = 1.0
+# Reasoning effort for backends that support it (anthropic: low|medium|high|xhigh|max).
+# Leave empty for the backend default.
+effort = ""
 
 [agent]
 # Max tool-call rounds per user message before Jarvis is told to wrap up
@@ -27,6 +34,17 @@ max_tool_rounds = 20
 # Summarize older conversation once the in-context transcript exceeds this many chars (~6k tokens)
 history_char_limit = 24000
 keep_recent = 8
+# TurboMCP tool exposure:
+#   "search" — send only core_tools plus find_tools/call_tool/read_skill; the model
+#              discovers everything else on demand (small, cache-stable context)
+#   "all"    — send every tool schema on every request (for models that can't
+#              handle tool search)
+tool_mode = "search"
+core_tools = ["run_command", "read_file", "write_file", "list_dir", "remember", "recall"]
+# Default character card for new sessions: jarvis, casual, robotic, or an imported card id
+character = "jarvis"
+# Max characters of MEMORY.md placed in the system prompt (the rest stays reachable via recall)
+memory_index_chars = 4000
 
 [paths]
 # Where Jarvis stores its mind (episodes, facts, skills, personality)
@@ -36,15 +54,16 @@ models = "models"
 
 [voice]
 enabled = false
-engine = "piper"  # "piper" or "kokoro"
-# Piper voice models (downloaded from rhasspy/piper-voices on HF)
+# enabled = true speaks every reply aloud (off by default; toggle in the web UI header).
+# Voice runs locally and works with every LLM provider.
+engine = "piper"  # "piper" (default) or "kokoro" (optional one-click install, kokoro-onnx)
+# Piper voice. Models are not bundled: download from the web UI Voice tab or
+# `/voice download piper:en_US-lessac-medium`.
 model = "en_US-lessac-medium"
-# Kokoro settings (if engine = "kokoro")
-kokoro_model = "hexgrad/Kokoro-82M"
 kokoro_voice = "af_sky"
 
 # STT settings
-stt_model = "small"  # faster-whisper model size: tiny, base, small, medium, large
+stt_model = "small"  # faster-whisper size: tiny, base, small (download via /voice download whisper:<size>)
 stt_device = "auto"  # "auto", "cpu", "cuda"
 stt_compute_type = "int8"  # faster-whisper compute type
 audio_device = ""  # optional sounddevice output device name/index
@@ -64,3 +83,9 @@ approval_timeout = 120
 # Status reports distinguish recorded-only, installed, and unavailable states.
 backend = "private-file"
 crontab_file = "~/.jarvis_crontab"
+
+[webui]
+# `jarvis --web` serves the browser UI. Keep it on loopback: the agent can run commands.
+host = "127.0.0.1"
+port = 7777
+open_browser = true

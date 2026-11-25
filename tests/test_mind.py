@@ -132,13 +132,14 @@ def test_summarization():
     from jarvis.config import load_config
 
     config = load_config()
+    config["agent"]["semantic_search"] = False
     config["agent"]["history_char_limit"] = 500
     config["agent"]["keep_recent"] = 4
 
     jarvis = Jarvis(config)
 
     class FakeLLM:
-        def chat(self, messages, tools=None, on_text=None):
+        def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
             assert "Transcript:" in messages[0]["content"]
             return {"role": "assistant", "content": "- user is testing\n- all fine"}
 

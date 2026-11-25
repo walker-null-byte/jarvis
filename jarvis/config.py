@@ -21,6 +21,9 @@ DEFAULTS = {
         "timeout": 120,
         "retries": 2,
         "retry_delay": 1.0,
+        # Optional reasoning effort for backends that support it
+        # (anthropic: low|medium|high|xhigh|max). Empty = backend default.
+        "effort": "",
     },
     "agent": {
         "max_tool_rounds": 20,
@@ -28,13 +31,27 @@ DEFAULTS = {
         # (~6k tokens), keeping at least this many recent messages verbatim.
         "history_char_limit": 24000,
         "keep_recent": 8,
+        # "search": send only core_tools + find_tools/call_tool and let the
+        # model discover the rest through TurboMCP search (saves context).
+        # "all": send every tool schema every request (legacy; for weak models).
+        "tool_mode": "search",
+        "core_tools": [
+            "run_command", "read_file", "write_file", "list_dir",
+            "remember", "recall",
+        ],
+        # Default character card id for new sessions (see mind/characters/)
+        "character": "jarvis",
+        # Cap on how much of MEMORY.md goes into the system prompt
+        "memory_index_chars": 4000,
+        # Blend embedding similarity into find_tools when the small embedding
+        # model has been downloaded (Models panel). Never downloads by itself.
+        "semantic_search": True,
     },
     "paths": {"mind": "mind", "models": "models"},
     "voice": {
         "enabled": False,
         "engine": "piper",
         "model": "en_US-lessac-medium",
-        "kokoro_model": "hexgrad/Kokoro-82M",
         "kokoro_voice": "af_sky",
         "stt_model": "small",
         "stt_device": "auto",
@@ -52,6 +69,11 @@ DEFAULTS = {
         "backend": "private-file",
         "crontab_file": "~/.jarvis_crontab",
     },
+    "webui": {
+        "host": "127.0.0.1",
+        "port": 7777,
+        "open_browser": True,
+    },
 }
 
 
@@ -65,7 +87,43 @@ def load_config():
             config.setdefault(section, {}).update(values)
     _apply_runtime_overrides(config)
     _apply_environment(config)
+    _validate_config(config)
     return config
+
+
+def _validate_config(config):
+    """Coerce and warn on obviously broken values without crashing."""
+    import sys
+    llm = config.get("llm", {})
+    # provider
+    from .providers import PRESETS
+    valid_providers = set(PRESETS) | {"custom"}
+    if llm.get("provider") not in valid_providers:
+        print(f"[config] warning: llm.provider {llm.get('provider')!r} not in {valid_providers}; leaving as-is", file=sys.stderr)
+    # base_url
+    url = llm.get("base_url", "")
+    if url and not (url.startswith("http://") or url.startswith("https://")):
+        print(f"[config] warning: llm.base_url {url!r} should start with http:// or https://", file=sys.stderr)
+    # numeric ranges
+    for path in ("llm.timeout", "llm.retries", "llm.retry_delay", "agent.max_tool_rounds", "agent.history_char_limit", "agent.keep_recent"):
+        sec, key = path.split(".")
+        val = config.get(sec, {}).get(key)
+        if isinstance(val, (int, float)) and val < 0:
+            print(f"[config] warning: {path}={val} cannot be negative; resetting to default", file=sys.stderr)
+            config[sec][key] = DEFAULTS[sec][key]
+    # enums
+    voice = config.get("voice", {})
+    if voice.get("engine") not in ("piper", "kokoro"):
+        print(f"[config] warning: voice.engine {voice.get('engine')!r} must be piper or kokoro", file=sys.stderr)
+        config["voice"]["engine"] = DEFAULTS["voice"]["engine"]
+    sec = config.get("security", {})
+    if sec.get("mode") not in ("guarded", "permissive"):
+        print(f"[config] warning: security.mode {sec.get('mode')!r} must be guarded or permissive", file=sys.stderr)
+        config["security"]["mode"] = DEFAULTS["security"]["mode"]
+    jobs = config.get("jobs", {})
+    if jobs.get("backend") not in ("private-file", "system"):
+        print(f"[config] warning: jobs.backend {jobs.get('backend')!r} must be private-file or system", file=sys.stderr)
+        config["jobs"]["backend"] = DEFAULTS["jobs"]["backend"]
 
 
 def runtime_config_path(config):
@@ -74,14 +132,27 @@ def runtime_config_path(config):
 
 
 def save_runtime_overrides(config, paths):
-    """Persist only explicitly selected, non-secret setting paths."""
-    data = {}
+    """Persist only explicitly selected, non-secret setting paths.
+
+    Merges with existing runtime overrides so saving a subset (e.g. model
+    only) doesn't wipe previously saved keys (e.g. base_url).
+    """
+    target = runtime_config_path(config)
+    # Start from existing persisted overrides
+    existing = {}
+    if target.exists():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    data = existing
     for path in paths:
         section, _, key = path.partition(".")
         if not section or not key or section not in config or key not in config[section]:
             continue
         data.setdefault(section, {})[key] = config[section][key]
-    target = runtime_config_path(config)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -114,6 +185,13 @@ def _apply_environment(config):
             if env_name not in os.environ:
                 continue
             raw = os.environ[env_name]
+            if isinstance(old_value, list):
+                # For list types (e.g. allowed_roots), split on os.pathsep / comma
+                if not raw.strip():
+                    continue
+                parts = [p.strip() for p in raw.replace(";", ",").replace(":", ",").split(",")]
+                values[key] = [p for p in parts if p]
+                continue
             if isinstance(old_value, bool):
                 values[key] = raw.strip().lower() in ("1", "true", "yes", "on")
             elif isinstance(old_value, int):

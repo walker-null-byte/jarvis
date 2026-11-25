@@ -1,50 +1,81 @@
-"""OpenAI-compatible LLM client with streaming and tool-call support.
+"""LLM facade: picks a backend from the provider preset and adds retries.
 
-Works against LM Studio, Ollama, llama.cpp, vLLM, or Gemini's OpenAI endpoint —
-whatever config.toml points at.
+Backends (jarvis/providers/):
+  chat      OpenAI-compatible Chat Completions (LM Studio, Ollama, vLLM, ...)
+  chatgpt   Sign in with ChatGPT -> Responses API
+  anthropic official anthropic SDK
+
+Every backend exposes ``chat(messages, tools, on_text, on_reasoning)``,
+``list_models(timeout)`` and ``check_model(ids, timeout)``.
 """
 
-import os
 import re
 import time
 
-from openai import OpenAI
+from .providers import backend_for
+from .providers.errors import LLMError
+from .providers.openai_chat import ChatBackend, resolve_key
+
+__all__ = ["LLM", "LLMError"]
+
+_RETRYABLE_NAMES = {
+    "APIConnectionError", "APITimeoutError", "ConnectError", "ConnectTimeout",
+    "ReadTimeout", "ReadError", "WriteTimeout", "PoolTimeout", "RemoteProtocolError",
+}
 
 
-class LLMError(RuntimeError):
-    """Normalized LLM request failure with the original cause attached."""
+def _build_backend(name, llm):
+    """Create a backend by name; SDK imports happen here, lazily."""
+    if name == "anthropic":
+        from .providers.anthropic_native import AnthropicBackend
+        return AnthropicBackend(llm)
+    if name == "chatgpt":
+        from .providers.chatgpt import ChatGPTBackend
+        return ChatGPTBackend(llm)
+    return ChatBackend(llm)
+
+
+def is_retryable(error):
+    """Retry only connection errors, timeouts, HTTP 429 and 5xx."""
+    if getattr(error, "_jarvis_partial", False):
+        return False
+    explicit = getattr(error, "retryable", None)
+    if explicit is not None:
+        return bool(explicit)
+    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    if isinstance(status, int):
+        return status == 429 or status >= 500
+    if isinstance(error, (ConnectionError, TimeoutError)):
+        return True
+    return any(cls.__name__ in _RETRYABLE_NAMES for cls in type(error).__mro__)
 
 
 class LLM:
     def __init__(self, config):
-        llm = config["llm"]
-        self.base_url = llm["base_url"]
-        self.api_key_env = llm["api_key_env"]
-        self.api_key = self._resolve_key(llm)
-        self.model = llm["model"]
-        self.stream = llm["stream"]
-        self.max_tokens = llm["max_tokens"]
-        self.timeout = float(llm.get("timeout", 120))
-        self.retries = max(0, int(llm.get("retries", 2)))
-        self.retry_delay = max(0.0, float(llm.get("retry_delay", 1.0)))
         self.last_error = None
-        self.client = OpenAI(
-            base_url=llm["base_url"],
-            api_key=self.api_key,
-            timeout=self.timeout,
-            max_retries=0,
-        )
+        self.reconfigure(config)
 
     @staticmethod
     def _resolve_key(llm):
         """Literal keys (session-local, never persisted) win over env vars."""
-        return llm.get("api_key") or os.environ.get(llm.get("api_key_env") or "") or "not-needed"
+        return resolve_key(llm)
+
+    @property
+    def client(self):
+        """The chat backend's OpenAI client (kept for tests/back-compat)."""
+        return getattr(self._impl, "client", None)
+
+    @client.setter
+    def client(self, value):
+        self._impl.client = value
 
     def reconfigure(self, config):
         """Apply runtime LLM settings without rebuilding the agent."""
         llm = config["llm"]
+        self.provider = llm.get("provider", "custom")
+        self.backend = backend_for(self.provider)
         self.base_url = llm["base_url"]
-        self.api_key_env = llm["api_key_env"]
+        self.api_key_env = llm.get("api_key_env")
         self.api_key = self._resolve_key(llm)
         self.model = llm["model"]
         self.stream = llm["stream"]
@@ -53,40 +84,28 @@ class LLM:
         self.retries = max(0, int(llm.get("retries", 2)))
         self.retry_delay = max(0.0, float(llm.get("retry_delay", 1.0)))
         self.last_error = None
-        self.client = OpenAI(
-            base_url=llm["base_url"],
-            api_key=self.api_key,
-            timeout=self.timeout,
-            max_retries=0,
-        )
+        self._impl = _build_backend(self.backend, llm)
 
     def probe(self, timeout=5.0, check_model=True):
         """Check reachability and list the models an endpoint exposes.
 
         Returns ``(ok, message, model_ids, http_status)`` and never raises.
-        With *check_model* (default), it also sends a 1-token chat request so
-        a wrong model or missing API key is reported instead of failing on
-        the first real turn. *message* extracts the server's own error text
-        (even from HTML error pages) and hints at the classic missing
-        ``/v1`` path mistake when the model listing itself 404s.
+        With *check_model* (default) it also verifies the configured model
+        (chat: a 1-token request; anthropic: the id must be listed; chatgpt:
+        skipped) so a wrong model or missing key is reported before the first
+        real turn. *message* extracts the server's own error text and hints at
+        the classic missing ``/v1`` path mistake when the listing 404s.
         """
         try:
-            page = self.client.models.list(timeout=timeout)
-            ids = sorted(model.id for model in page.data)
+            ids = self._impl.list_models(timeout=timeout)
         except Exception as error:
-            status = getattr(error, "status_code", None)
-            return False, _probe_error_message(error, self.base_url, v1_hint=True), [], status
+            status = getattr(error, "status_code", None) or getattr(error, "status", None)
+            return False, _probe_error_message(error, self.base_url, v1_hint=self.backend == "chat"), [], status
         if check_model and self.model:
             try:
-                self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": "ping"}],
-                    max_tokens=1,
-                    stream=False,
-                    timeout=timeout,
-                )
+                self._impl.check_model(ids, timeout=timeout)
             except Exception as error:
-                status = getattr(error, "status_code", None)
+                status = getattr(error, "status_code", None) or getattr(error, "status", None)
                 return (
                     False,
                     (
@@ -99,87 +118,26 @@ class LLM:
                 )
         return True, f"Connected — {len(ids)} model(s) listed", ids, 200
 
-    def chat(self, messages, tools=None, on_text=None):
-        """Send one chat request; returns an assistant message dict.
+    def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
+        """Send one request; returns an assistant message dict (see CONTRACT).
 
-        The returned dict is API-ready for the next request:
-        {"role": "assistant", "content": str, "tool_calls": [...]?}
-
-        on_text(token) is called for each streamed text fragment.
+        on_text(token) / on_reasoning(token) receive streamed fragments.
+        Retries connection errors, timeouts, 429 and 5xx with exponential
+        backoff, never other 4xx and never after partial output.
         """
-        kwargs = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens}
-        if tools:
-            kwargs["tools"] = tools
-
         for attempt in range(self.retries + 1):
             try:
                 self.last_error = None
-                if not self.stream:
-                    return self._chat_blocking(kwargs, on_text)
-                return self._chat_streaming(kwargs, on_text)
+                return self._impl.chat(messages, tools, on_text, on_reasoning)
             except Exception as error:
                 self.last_error = error
-                partial = bool(getattr(error, "_jarvis_partial", False))
-                if attempt >= self.retries or partial:
+                if attempt >= self.retries or not is_retryable(error):
+                    if isinstance(error, LLMError):
+                        raise
                     raise LLMError(
                         f"LLM request failed after {attempt + 1} attempt(s): {error}"
                     ) from error
                 time.sleep(self.retry_delay * (2 ** attempt))
-
-    def _chat_blocking(self, kwargs, on_text):
-        choice = self.client.chat.completions.create(**kwargs).choices[0].message
-        msg = {"role": "assistant", "content": choice.content or ""}
-        if choice.tool_calls:
-            msg["tool_calls"] = [
-                {
-                    "id": tc.id or f"call_{i}",
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments or ""},
-                }
-                for i, tc in enumerate(choice.tool_calls)
-            ]
-        if on_text and msg["content"]:
-            on_text(msg["content"])
-        return msg
-
-    def _chat_streaming(self, kwargs, on_text):
-        text_parts = []
-        tool_calls = {}  # index -> accumulating call dict
-        try:
-            for chunk in self.client.chat.completions.create(stream=True, **kwargs):
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                if delta is None:
-                    continue
-                if delta.content:
-                    text_parts.append(delta.content)
-                    if on_text:
-                        on_text(delta.content)
-                for tc in delta.tool_calls or []:
-                    slot = tool_calls.setdefault(tc.index, {
-                        "id": "", "type": "function",
-                        "function": {"name": "", "arguments": ""},
-                    })
-                    if tc.id:
-                        slot["id"] = tc.id
-                    if tc.function:
-                        if tc.function.name:
-                            slot["function"]["name"] += tc.function.name
-                        if tc.function.arguments:
-                            slot["function"]["arguments"] += tc.function.arguments
-        except Exception as error:
-            error._jarvis_partial = bool(text_parts or tool_calls)
-            raise
-
-        msg = {"role": "assistant", "content": "".join(text_parts)}
-        if tool_calls:
-            # Some local servers omit tool-call IDs; synthesize them.
-            for i in sorted(tool_calls):
-                if not tool_calls[i]["id"]:
-                    tool_calls[i]["id"] = f"call_{i}"
-            msg["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-        return msg
 
 
 def _probe_error_message(error, base_url, v1_hint=False):
