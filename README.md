@@ -27,6 +27,16 @@ llama.cpp, vLLM) or any API-key provider.
 ### 1. Install
 
 ```bash
+pipx install jarvis-ai          # or: pip install jarvis-ai
+```
+
+Your settings and memory live in `~/.jarvis` (set `JARVIS_HOME` to move them),
+and file tools can reach your home folder.
+
+Want to hack on Jarvis itself? Run it from a clone instead — then the clone is
+its home and file tools stay inside it:
+
+```bash
 git clone https://github.com/walker-null-byte/jarvis.git
 cd jarvis
 python -m venv .venv && source .venv/bin/activate   # fish: source .venv/bin/activate.fish
@@ -259,7 +269,8 @@ jarvis-mcp                                   # expose the tools as an MCP server
 
 ## Configuration
 
-Settings come from `config.toml` (copy `config.example.toml`), then
+Settings come from `config.toml` in Jarvis's home (`~/.jarvis`, or the clone;
+copy `config.example.toml`), then
 `mind/runtime_config.json` (what you change in the UI), then `JARVIS_*`
 environment variables. API keys you paste in the UI are saved to
 `~/.config/jarvis/keys.json` (owner-only permissions; untick *Remember on this
@@ -331,6 +342,8 @@ ruff check .
   `fetch_page` with contact extraction, 50 tool rounds + Continue.
 
 **Improved**
+- On PyPI as `jarvis-ai` (`pipx install jarvis-ai`). Installed copies keep
+  their data in `~/.jarvis`; a git clone still uses its own folder.
 - DeepSeek thinking mode keeps its reasoning across tool calls.
 - Several agents can run at once; approvals reach the right one.
 

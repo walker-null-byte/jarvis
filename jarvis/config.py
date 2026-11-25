@@ -1,4 +1,10 @@
-"""Configuration loading. config.toml lives in the project root, next to mind/."""
+"""Configuration loading. config.toml lives in Jarvis's home folder, next to mind/.
+
+The home folder (ROOT) is, in order:
+  1. $JARVIS_HOME, if set;
+  2. the source checkout, when Jarvis runs from a git clone (pip install -e .);
+  3. ~/.jarvis for a normal install (pip install jarvis-ai).
+"""
 
 try:
     import tomllib
@@ -8,7 +14,24 @@ import json
 import os
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_DIR = Path(__file__).resolve().parent
+
+
+def _home():
+    env = os.environ.get("JARVIS_HOME")
+    if env:
+        return Path(env).expanduser().resolve()
+    checkout = PACKAGE_DIR.parent
+    if (checkout / "pyproject.toml").is_file() and (checkout / "jarvis" / "__init__.py").is_file():
+        return checkout
+    return Path.home() / ".jarvis"
+
+
+ROOT = _home()
+# Running from a source checkout: file tools default to the project folder.
+# Installed: they default to the user's home folder (~/.jarvis alone would be useless).
+FROM_CHECKOUT = ROOT == PACKAGE_DIR.parent
+DEFAULT_ROOT = ROOT if FROM_CHECKOUT else Path.home()
 
 # The core_tools list shipped before 1.1.2; configs still holding exactly this get the new one.
 OLD_CORE_TOOLS = ["run_command", "read_file", "write_file", "list_dir", "remember", "recall"]
@@ -65,7 +88,7 @@ DEFAULTS = {
     },
     "security": {
         "mode": "guarded",
-        "allowed_roots": [str(ROOT)],
+        "allowed_roots": [str(DEFAULT_ROOT)],
         "allow_outside_roots": False,
         "max_command_timeout": 300,
         "approval_timeout": 120,
@@ -85,6 +108,7 @@ DEFAULTS = {
 
 def load_config():
     config = {section: dict(values) for section, values in DEFAULTS.items()}
+    ROOT.mkdir(parents=True, exist_ok=True)
     path = ROOT / "config.toml"
     if path.exists():
         with open(path, "rb") as f:

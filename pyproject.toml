@@ -1,22 +1,22 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jarvis"
+name = "jarvis-ai"
 version = "1.1.2"
-description = "A lightweight local-first terminal AI assistant and OpenAI-compatible Hermes alternative"
+description = "A local-first, self-improving AI agent with a web UI: any model provider, memory, tools, MCP, agents, routines and group discussions"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
-    {name = "dillu", email = "dillu@example.com"}
+    {name = "walker-null-byte"}
 ]
 keywords = ["ai", "agent", "terminal", "local-ai", "openai-compatible", "hermes-alternative", "voice", "tts", "stt", "memory", "mcp", "lm-studio", "ollama", "llama.cpp", "gemini"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -59,6 +59,11 @@ dev = [
     "mypy>=1.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/walker-null-byte/jarvis"
+Source = "https://github.com/walker-null-byte/jarvis"
+Changelog = "https://github.com/walker-null-byte/jarvis#changelog"
+
 [project.scripts]
 jarvis = "jarvis.__main__:main"
 jarvis-supervisor = "jarvis.supervisor:main"
@@ -75,6 +80,9 @@ include = ["jarvis*"]
 "*" = ["*.md", "*.toml"]
 "jarvis.webui" = ["static/*", "static/**/*"]
 "jarvis" = ["characters_builtin/*.json", "agents_builtin/**/*"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["__pycache__", "__pycache__/*", "*.pyc"]
 
 [tool.ruff]
 line-length = 100
