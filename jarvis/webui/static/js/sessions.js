@@ -38,7 +38,7 @@ export class SessionList {
 
   row(session) {
     const open = el("button", {
-      class: "session-open", "aria-current": session.active ? "true" : null,
+      class: "session-open", "aria-current": session.id === this.ctx.sessionId ? "true" : null, title: session.title || "Conversation",
       onclick: () => this.resume(session.id),
     }, el("span", { class: "session-title", text: session.title || "Conversation" }),
        el("span", { class: "session-time", text: when(session.updated) }));
@@ -49,7 +49,7 @@ export class SessionList {
       this.closeMenus();
       if (!had) li.append(this.menu(session));
     });
-    const li = el("li", { class: `session${session.active ? " active" : ""}` }, open, more);
+    const li = el("li", { class: `session${session.id === this.ctx.sessionId ? " active" : ""}` }, open, more);
     return li;
   }
 
@@ -62,10 +62,9 @@ export class SessionList {
       item("Delete", () => this.remove(session), "danger"));
   }
 
-  async resume(id) {
-    if (id === this.ctx.sessionId) return;
-    try { await this.ctx.applySnapshot(await api(`/sessions/${id}/resume`, { method: "POST" })); }
-    catch (error) { toast(error.message, "error"); }
+  // Opening a chat is a route change; app.js resumes the session when the route lands.
+  resume(id) {
+    this.ctx.navigate(`chat/${encodeURIComponent(id)}`);
     this.ctx.closeRail?.();
   }
 

@@ -71,31 +71,3 @@ export function renderTools(container) {
   refresh();
   return { refresh };
 }
-
-export function renderJobs(container) {
-  const list = el("div", { class: "fact-list" });
-  container.append(list);
-
-  async function act(path, options) {
-    try { await api(path, options); await refresh(); } catch (error) { toast(error.message, "error"); }
-  }
-
-  async function refresh() {
-    try {
-      const { jobs } = await api("/jobs");
-      list.replaceChildren(...(jobs.length ? jobs.map((job) => el("article", { class: "fact" },
-        el("div", { class: "fact-head" }, el("strong", { text: job.name }),
-          el("span", { class: `badge ${job.enabled ? "ok" : ""}`, text: job.enabled ? "enabled" : "disabled" })),
-        el("div", { class: "note", text: `${job.schedule || "no schedule"}${job.next_run ? ` · next ${job.next_run}` : ""}` }),
-        job.status ? el("div", { class: "note", text: `last: ${job.status.status || formatJson(job.status, 120)}` }) : null,
-        el("div", { class: "card-actions" },
-          el("button", { text: job.enabled ? "Disable" : "Enable",
-            onclick: () => act(`/jobs/${encodeURIComponent(job.name)}/${job.enabled ? "disable" : "enable"}`, { method: "POST" }) }),
-          el("button", { class: "danger", text: "Delete", onclick: async () => {
-            if (await confirmBox("Delete job", `Delete job “${job.name}”?`)) act(`/jobs/${encodeURIComponent(job.name)}`, { method: "DELETE" });
-          } })))) : [el("p", { class: "note", text: "No scheduled jobs. Ask Jarvis to create one." })]));
-    } catch (error) { toast(error.message, "error"); }
-  }
-  refresh();
-  return { refresh };
-}

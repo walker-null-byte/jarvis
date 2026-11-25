@@ -92,6 +92,8 @@ def main():
     parser.add_argument("--doctor", action="store_true", help="check endpoint, config, and mind health")
     parser.add_argument("--version", action="store_true", help="show version")
     parser.add_argument("--web", action="store_true", help="serve the local web UI")
+    parser.add_argument("--daemon", action="store_true",
+                        help="headless: run the routine scheduler only (used by jarvis.service)")
     parser.add_argument("--host", help="web UI host (default: config webui.host, 127.0.0.1)")
     parser.add_argument("--port", type=int, help="web UI port (default: config webui.port, 7777)")
     parser.add_argument("--no-browser", action="store_true", help="web UI: do not open a browser")
@@ -130,6 +132,11 @@ def main():
 
     if args.web:
         run_web(args)
+        return
+
+    if args.daemon:
+        from .routines import run_daemon
+        run_daemon(load_config())
         return
 
     jarvis = Jarvis(load_config())

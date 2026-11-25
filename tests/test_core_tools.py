@@ -65,7 +65,7 @@ def test_search_mode_sends_fixed_small_tools_array(tmp_path):
     names = _names(llm.requests[0]["tools"])
     assert names[-3:] == ["find_tools", "call_tool", "read_skill"]
     assert names[:-3] == sorted(names[:-3])
-    assert "cron_add" not in names and "run_command" in names
+    assert "routine_create" in names and "cron_add" not in names and "run_command" in names
 
 
 def test_all_mode_sends_every_tool(tmp_path):
@@ -73,15 +73,15 @@ def test_all_mode_sends_every_tool(tmp_path):
     jarvis = _agent(tmp_path, llm, tool_mode="all")
     jarvis.ask("hi")
     names = _names(llm.requests[0]["tools"])
-    assert "cron_add" in names and "find_tools" not in names
+    assert "routine_create" in names and "cron_add" not in names and "find_tools" not in names
     assert "# Tools" not in llm.requests[0]["messages"][0]["content"]
 
 
 def test_find_tools_excludes_core_and_recovers(tmp_path):
     jarvis = _agent(tmp_path, ScriptedLLM())
-    found = jarvis.exposure.find_tools("cron schedule job", 5)
+    found = jarvis.exposure.find_tools("recurring routine schedule", 5)
     names = [t["name"] for t in found["tools"]]
-    assert names and all(n.startswith("cron_") for n in names)
+    assert names and names[0].startswith("routine_") and not any(n.startswith("cron_") for n in names)
     assert "input_schema" in found["tools"][0]
     assert not {"run_command", "read_file", "find_tools"} & set(names)
     nothing = jarvis.exposure.find_tools("zzzqqq", 5)

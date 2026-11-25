@@ -1,0 +1,227 @@
+schema = 1
+id = "lead-finder"
+name = "Lead Finder"
+version = "0.1.0"
+description = "Finds a few high-quality leads on Instagram and LinkedIn, looks up their public contact details and drafts personal messages for you to send."
+author = "Jarvis"
+icon = "target"
+min_jarvis = "1.1.2"
+tags = ["sales", "outreach", "research"]
+
+[agent]
+prompt = "prompt.md"
+greeting = "Tell me who you're looking for, or press **Find leads**. I find a few people who really fit, check their public contact details and draft personal messages. You send them yourself."
+core_tools = ["web_search", "fetch_page"]
+max_tool_rounds = 60
+suggestions = [
+  "Which leads should I contact first?",
+  "Rewrite the first message for my best lead to be shorter",
+  "Who hasn't replied yet?",
+]
+
+[permissions]
+network = true
+commands = false
+files = "data"
+
+[[settings]]
+key = "offer"
+label = "What are you promoting?"
+type = "textarea"
+required = true
+placeholder = "A hands-on workshop on AI tools for indie game developers, 2 hours, online"
+help = "One or two sentences: the work, event or service, and what the person gets out of it."
+
+[[settings]]
+key = "ideal_lead"
+label = "Who is a great lead?"
+type = "textarea"
+required = true
+placeholder = "Indie game developers and small studio founders in India who post about their games"
+help = "Describe the people you want: role, field, size, place, and signs they'd care. Leads are scored against this."
+
+[[settings]]
+key = "sender_name"
+label = "Your name"
+type = "text"
+help = "Used to sign the drafted messages."
+
+[[settings]]
+key = "calendar_link"
+label = "Calendar link"
+type = "url"
+placeholder = "https://cal.com/you/intro"
+help = "Sent in follow-ups to people who replied, so they can book a call."
+
+[[settings]]
+key = "tone"
+label = "Message tone"
+type = "select"
+options = ["warm and friendly", "professional", "casual", "enthusiastic"]
+default = "warm and friendly"
+
+[[settings]]
+key = "min_score"
+label = "Minimum fit score to keep (1–5)"
+type = "number"
+default = 3
+min = 1
+max = 5
+help = "Leads scored below this are not saved."
+
+[[settings]]
+key = "SERPER_API_KEY"
+label = "Serper.dev API key (optional, better Google results)"
+type = "secret"
+help = "Without a key, searches use a free search engine that works but finds fewer profiles."
+
+[[settings]]
+key = "BRAVE_API_KEY"
+label = "Brave Search API key (optional)"
+type = "secret"
+
+[[records]]
+name = "leads"
+label = "Leads"
+unique = ["profile_url"]
+title_field = "name"
+fields = [
+  { name = "name", type = "text", required = true },
+  { name = "platform", type = "select", options = ["instagram", "linkedin", "other"] },
+  { name = "profile_url", label = "Profile", type = "url", help = "the person's own Instagram or LinkedIn profile URL" },
+  { name = "headline", type = "text", help = "what they do, from their bio or headline" },
+  { name = "location", type = "text" },
+  { name = "fit_score", label = "Fit", type = "number", min = 1, max = 5, help = "1-5 against the ideal lead" },
+  { name = "fit_reason", label = "Why", type = "text", help = "one line: why they fit (or don't)" },
+  { name = "website", type = "url", help = "their own site, portfolio or link page" },
+  { name = "email", type = "email", help = "only if seen on a public page" },
+  { name = "phone", type = "text", help = "only a public business number seen on a page" },
+  { name = "contact_source", label = "Contact source", type = "url", help = "the page where the email/phone was found" },
+  { name = "contact_verified", label = "Verified", type = "boolean", help = "true only if the page clearly belongs to this person or their business" },
+  { name = "first_message", label = "First message", type = "textarea" },
+  { name = "follow_up", label = "Follow-up", type = "textarea" },
+  { name = "status", type = "select", default = "new", editable = true, options = ["new", "contacted", "replied", "call_link_sent", "booked", "not_interested"] },
+  { name = "notes", type = "textarea", editable = true },
+  { name = "found_via", label = "Found via", type = "text", hidden = true, help = "the search that found them" },
+]
+
+[[actions]]
+id = "find"
+label = "Find leads"
+icon = "search"
+description = "Search public Instagram and LinkedIn profiles for people who fit, score them and save the good ones."
+records = "leads"
+inputs = [
+  { key = "niche", label = "Who are you looking for?", type = "text", required = true, placeholder = "indie game developers" },
+  { key = "platforms", label = "Where", type = "multiselect", options = ["instagram", "linkedin"], default = ["instagram", "linkedin"] },
+  { key = "location", label = "Location (optional)", type = "text", placeholder = "India" },
+  { key = "count", label = "How many good leads", type = "number", default = 10, min = 1, max = 30 },
+]
+prompt = """Find {count} new high-quality leads: {niche}.
+Platforms: {platforms}. Location focus: {location}.
+I already have {records.leads.count} leads saved; don't repeat them.
+
+Work like this:
+1. Call search_profiles for each platform with a short query (2-5 words, e.g. "indie game developer", "game studio founder"), plus the location.
+2. For every profile it returns, score the fit 1-5 against my ideal lead (in your settings) from the name, bio and headline, with a one-line reason.
+3. Right away, call records_add with ALL profiles scoring {settings.min_score} or more: name, platform, profile_url, headline (their bio or headline), location if stated, fit_score, fit_reason, found_via. Quality over quantity: skip brands, fan pages, news pages and poor fits.
+4. If you still have fewer than {count} new leads, search again with different words (another job title, "founder", "solo dev", the kind of games, or without the location). Up to 4 searches per platform. If search_profiles fails, use web_search with site:instagram.com or site:linkedin.com/in yourself.
+5. Don't fetch instagram.com or linkedin.com pages: they block robots.
+6. Finish with a short summary: how many you saved, the best 3 and why, and what to search next. Don't look up contact details yet."""
+
+[[actions]]
+id = "contacts"
+label = "Find contact details"
+icon = "mail"
+description = "Look up public business emails, phones and websites for leads that don't have them yet."
+records = "leads"
+inputs = [
+  { key = "limit", label = "How many leads", type = "number", default = 5, min = 1, max = 20 },
+]
+prompt = """Find public contact details for up to {limit} of my leads that have no email yet.
+First get them with records_query(where={"email": ""}, fields=["id","name","headline","profile_url","website","location"]), best fit_score first.
+
+For each lead:
+1. Use find_contact with their name and a hint (their work, studio or city). If it gives nothing useful, search the web for their name plus their studio/website and fetch_page their own website, portfolio, link-in-bio page or studio contact page.
+2. Only record an email or phone that you actually saw on a page. Never guess or build one from a pattern (no "firstname@studio.com" guesses). Put the page in contact_source. Set contact_verified to true only when that page clearly belongs to this person or their business; otherwise false.
+3. Prefer business contacts (studio email, booking email) over personal ones. Skip private-looking personal numbers.
+4. Save what you found with records_update. If you found nothing, add a short note in notes (e.g. "no public email found; DM only").
+
+End with a short table: name, what you found, source."""
+
+[[actions]]
+id = "drafts"
+label = "Draft first messages"
+icon = "pencil"
+description = "Write a short, personal first message for each new lead. You send them yourself."
+records = "leads"
+inputs = [
+  { key = "limit", label = "How many leads", type = "number", default = 10, min = 1, max = 30 },
+  { key = "angle", label = "Anything to mention? (optional)", type = "textarea", placeholder = "Early-bird price ends Friday" },
+]
+prompt = """Draft first messages for up to {limit} leads with status "new" that have no first_message yet.
+Get them with records_query(where={"status": "new", "first_message": ""}) without a fields filter: you need each lead's name, headline and fit_reason. Read the agent_skill "outreach-messages" first.
+
+For each lead write one first message for their platform (Instagram DM or LinkedIn message):
+- Use their real first name. Open with something specific from their headline or work (a game, a project, their studio). If you know nothing specific, say what caught your eye about their work in general terms; never make up details, and never leave placeholders like [Name].
+- One or two sentences on my offer and why it fits them in particular.
+- End with a light, easy question. No calendar link in a first message.
+- Under 80 words, tone: {settings.tone}. Sign as {settings.sender_name}.
+- Extra to mention: {angle}
+
+Save each with records_update(id, {"first_message": "..."}). Don't change the status: I send the messages myself and then mark them contacted.
+End with a one-line summary."""
+
+[[actions]]
+id = "followups"
+label = "Draft follow-ups"
+icon = "send"
+description = "For leads marked replied: draft the reply that sends your calendar link."
+records = "leads"
+inputs = [
+  { key = "context", label = "What did they say? (optional)", type = "textarea", placeholder = "Most asked about dates and price" },
+]
+prompt = """Draft follow-ups for my leads with status "replied" (records_query(where={"status": "replied"})).
+My calendar link is: {settings.calendar_link}. If that says "(not set)", stop and ask me for it.
+
+For each replied lead write a follow-up message:
+- Thank them for replying, warmly and briefly, referring to our earlier conversation (their first_message is what I sent).
+- Offer a short call and include the calendar link.
+- Under 70 words, tone: {settings.tone}. Sign as {settings.sender_name}.
+- Notes on their replies: {context}
+
+Save each with records_update(id, {"follow_up": "..."}). Don't change the status; I mark it call_link_sent after sending."""
+
+[[actions]]
+id = "review"
+label = "Pipeline review"
+icon = "chart"
+description = "Counts by stage, who to contact next, and what is going stale."
+records = "leads"
+inputs = []
+prompt = """Review my lead pipeline. Use records_query to read all leads (fields: id, name, fit_score, status, email, first_message, follow_up, updated).
+Report briefly in markdown:
+1. Counts per status (new → contacted → replied → call_link_sent → booked / not_interested).
+2. The 5 best leads to act on next and the exact next step for each.
+3. Leads that went quiet: contacted more than 5 days ago without a reply (suggest one gentle nudge each, not pushy).
+4. Gaps: good leads with no message drafted, or no contact details.
+Don't change any records."""
+
+[[exports]]
+id = "csv"
+label = "Leads (CSV)"
+description = "For Excel or Google Sheets"
+records = "leads"
+format = "csv"
+
+[[exports]]
+id = "outreach"
+label = "Outreach sheet"
+description = "Every lead with its message, ready to copy"
+format = "template"
+template = "exports/outreach.md"
+
+[[exports]]
+id = "json"
+label = "All data (JSON)"
+format = "json"

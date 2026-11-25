@@ -46,9 +46,55 @@ class WebState:
         self.active_downloads = set()
         self.pending_approvals = {}  # request_id -> event data, for reconnecting browsers
         self.maintenance_lock = threading.Lock()  # dream cycle / codify
+        self._runtimes = self._agents = self._discussions = self._routines = None
         # Web mode: approvals must become events, never a terminal prompt.
         jarvis.approvals.set_fallback(None)
         jarvis.events.subscribe(self._watch_errors)
+
+    # ---------- feature managers (created lazily; each takes this WebState) ----------
+
+    @property
+    def runtimes(self):
+        """Extra Jarvis instances (agent chats, discussions, routines) on the shared event bus."""
+        if self._runtimes is None:
+            from ..runtime import Runtimes
+            self._runtimes = Runtimes(self.jarvis.config, self.jarvis.events)
+        return self._runtimes
+
+    # The three managers below live in modules written by their own feature
+    # streams; they are imported on first use so the web UI works without them.
+    @property
+    def agents(self):
+        """AgentManager (jarvis/specialists.py)."""
+        if self._agents is None:
+            from ..specialists import AgentManager
+            self._agents = AgentManager(self)
+            from .. import subagents
+            subagents.set_agent_manager(self._agents)  # spawn_agent(agent=<plugin id>)
+        return self._agents
+
+    @property
+    def discussions(self):
+        """DiscussionManager (jarvis/discussions.py)."""
+        if self._discussions is None:
+            from ..discussions import DiscussionManager
+            self._discussions = DiscussionManager(self)
+        return self._discussions
+
+    @property
+    def routines(self):
+        """RoutineScheduler (jarvis/routines.py)."""
+        if self._routines is None:
+            from ..routines import RoutineScheduler
+            self._routines = RoutineScheduler(self)
+        return self._routines
+
+    def resolve_approval(self, request_id, approved):
+        """Resolve a pending approval: the main chat first, then the other runtimes."""
+        if self.jarvis.approvals.resolve(request_id, approved):
+            return True
+        owner = self.runtimes.find_approval(request_id) if self._runtimes else None
+        return bool(owner and owner.approvals.resolve(request_id, approved))
 
     # ---------- events ----------
 

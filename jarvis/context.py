@@ -180,7 +180,8 @@ def skills_index(mind):
     return "# Skills\nCall read_skill(name) before following one.\n" + "\n".join(lines)
 
 
-def build_system_prompt(mind, character=None, tools_section="", memory_chars=4000):
+def build_system_prompt(mind, character=None, tools_section="", memory_chars=4000,
+                       role_prompt="", replace_persona=False):
     """Assemble the system prompt from the mind files + runtime context.
 
     character is a card dict (see characters.py); None means the jarvis card. It must be
@@ -195,9 +196,11 @@ def build_system_prompt(mind, character=None, tools_section="", memory_chars=400
 
     add(_read(mind, "self.md"))
     character = character or CharacterStore(mind).get("jarvis")
-    add(render_persona(character, user_name(mind)).strip())
-    if character.get("id") != "jarvis":
-        add(PERSONA_NOTE)
+    if not (replace_persona and role_prompt):
+        add(render_persona(character, user_name(mind)).strip())
+        if character.get("id") != "jarvis":
+            add(PERSONA_NOTE)
+    add(role_prompt.strip())  # an agent profile's role: after the persona, or instead of it
     add(_read(mind, "user.md"))
     add(_read(mind, "system.md"))
     add(_cap_memory(_read(mind, "MEMORY.md"), memory_chars))

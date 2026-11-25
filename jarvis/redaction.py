@@ -11,8 +11,19 @@ _SECRET_PATTERNS = (
 )
 
 
+def _saved_secrets():
+    """Values saved in the keystore (covers new keys at once)."""
+    try:
+        from . import keystore
+        return keystore.saved_values()
+    except Exception:
+        return []
+
+
 def redact_text(value):
     text = str(value)
+    for secret in _saved_secrets():
+        text = text.replace(secret, "[REDACTED]")
     for pattern in _SECRET_PATTERNS:
         if pattern.groups >= 3:
             text = pattern.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)

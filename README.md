@@ -52,8 +52,8 @@ first launch shows a short **welcome tour**:
      you approve, and you're done.
    - **Local model** — start LM Studio or Ollama, pick it, press *Test*.
    - **API key** — OpenAI API, Anthropic, Gemini, OpenRouter, Groq, DeepSeek,
-     Mistral, xAI… set the key's environment variable, e.g.
-     `export ANTHROPIC_API_KEY=…`.
+     Mistral, xAI… paste the key (it's remembered on this computer), or set
+     its environment variable, e.g. `export ANTHROPIC_API_KEY=…`.
 2. **Choose a character** — Jarvis (calm, dry wit), Jarvis Casual, or J-7
    Robotic. You can switch any time.
 3. **Quick tips** — and you're chatting.
@@ -63,7 +63,11 @@ first launch shows a short **welcome tour**:
 - *"How much disk space do I have left?"* — Jarvis runs a command and reports.
 - *"Remember that I prefer short answers."* — saved to memory for every future
   session.
-- *"Every morning at 9, summarize my ~/notes folder."* — creates a scheduled job.
+- *"Every weekday at 9, summarize my ~/notes folder."* — creates a routine.
+- **Agents → Lead Finder** — fill in what you offer and who a good lead is,
+  then press *Find leads*.
+- **Discussions → New discussion** — give a goal and an agenda, pick two or
+  three participants (any providers), press *Start*.
 - Hover a reply: **Copy**, **Re-do response**, **Speak**. Hover your own
   message: **Edit** and resend.
 - Quota ran out or want a different model? Click the **provider · model** pill
@@ -85,7 +89,7 @@ prompt. Both share the same agent, memory and slash commands.
 | LM Studio, Ollama, llama.cpp, vLLM | Free, runs locally | Start the server, pick the preset |
 | OpenAI API | Pay-as-you-go API key | `OPENAI_API_KEY` |
 | Anthropic (Claude) | API key | `ANTHROPIC_API_KEY` |
-| Gemini, OpenRouter, Groq, DeepSeek, Mistral, xAI | API key | each provider's `*_API_KEY` |
+| Gemini, OpenRouter, Groq, DeepSeek, Mistral, xAI | API key | paste in Settings, or each provider's `*_API_KEY` |
 | Any OpenAI-compatible server | — | `/provider set URL KEY_OR_ENV` |
 
 *ChatGPT* and *OpenAI API* are different on purpose: ChatGPT uses the
@@ -101,13 +105,71 @@ prompt caching and adaptive thinking.
 ### Tools without context bloat (TurboMCP)
 
 Jarvis has dozens of tools, but the model only sees a handful of core ones
-(run a command, read/write files, remember/recall) plus `find_tools`,
+(run a command, read/edit/write files, grep, glob, remember/recall, create a
+routine, spawn a subagent) plus `find_tools`,
 `call_tool` and `read_skill`. Everything else is discovered on demand through
 TurboMCP search. That keeps every request small — and identical from round to
 round, so prompt caching works on hosted APIs and local servers don't
 re-process the whole conversation. Download the small embedding model (31 MB)
 for smarter, meaning-based tool search. Set `agent.tool_mode = "all"` for
 models that can't use tool search.
+
+### Agents — specialised, importable plugins
+
+An agent is a folder that turns Jarvis into a specialist: a role prompt,
+settings you fill once (including API keys, stored privately), action buttons
+with their own inputs, tables it fills in (records), exports (CSV, JSON,
+Markdown or your own template), optional Python tools and skills, and its own
+chat. It can still use every Jarvis tool.
+
+- **Lead Finder** (built in) follows a manual lead-generation workflow: find
+  people through public Instagram/LinkedIn profiles, score their fit (quality
+  over quantity), look up public contact details with sources (never guessed),
+  draft a personal first message, and after a reply draft the follow-up with
+  your calendar link. You send the messages yourself — Jarvis never automates
+  DMs, which would break those platforms' terms.
+- **Import** an agent from a `.zip`, a GitHub link or a folder. Its Python
+  code only loads after you review and trust it. **Export** it (optionally
+  with its records; never with secrets), **duplicate** a built-in to change it,
+  or create a prompt-only agent with *New agent*.
+- Format reference: [docs/agent-plugins.md](docs/agent-plugins.md).
+
+### Routines — recurring and timed tasks
+
+Ask in plain English (*"every weekday at 9"*, *"every 2 hours"*, *"tomorrow at
+8"*) or use cron. A routine can ask Jarvis something or run an agent action
+(e.g. a weekly lead hunt). Each run gets its own conversation; you see the
+history, a toast, a badge and (if you allow it) a desktop notification.
+Routines run while `jarvis --web` is open, or always with `jarvis --daemon`
+(see `jarvis.service`). Missed runs can catch up once. Old cron jobs are
+imported automatically (paused if your crontab still runs them).
+
+### Discussions — group chats with an agenda
+
+Put 2–6 participants in a room, each on any provider and model (Gemini, a
+local model, Claude…), with a mandatory goal and agenda. Modes: **round
+robin**, **parallel** (independent answers, revealed together), **moderated**
+(a moderator picks who speaks and when to move on) and **debate**. Participants
+can research with web search. You can speak at any time or `@mention`
+someone; pause, skip to the next item or conclude. Each item gets a summary
+and the discussion ends with minutes (decisions, action items, open
+questions), exportable as Markdown.
+
+### A stronger harness
+
+- **Parallel tool calls** for read-only tools (reads, searches, web, subagents).
+- **Coding tools**: `read_file` by line range, exact-match `edit_file`,
+  `grep` (ripgrep), `glob`.
+- **Large outputs** are saved to a file; the model gets the start, the end and
+  the path, so context stays small.
+- **Background commands** for builds and servers (`run_command(background=true)`).
+- **MCP servers**: paste the JSON from any MCP server's README (Claude Desktop
+  format) in *Tools*. Their tools join the searchable catalog, so 50 MCP tools
+  cost almost nothing up front. Read-only tools run freely; others ask once
+  per server.
+- **Subagents** (`spawn_agent`): hand broad research to a helper with its own
+  context and get back only the answer — or delegate to an installed agent.
+- Up to 50 tool rounds per message, with a **Continue** button after that.
 
 ### Memory that grows
 
@@ -152,10 +214,11 @@ Speech runs on your machine and works with every provider.
 
 ### Web UI
 
-Streaming chat with reasoning and tool-call cards, inline approvals for risky
-commands, artifacts (images, tables, charts), sessions (search, rename, export),
-and panels for Characters, Mind, Memory, Tools & Skills, Jobs, Voice and
-Settings. It binds to `127.0.0.1` with a per-run secret token; Jarvis can run
+A Claude-style sidebar (New chat, Search, Agents, Discussions, Routines,
+Tools, Recents). Streaming chat with live thinking, tokens/sec, tool-call
+cards, inline approvals for risky commands, artifacts (images, tables,
+charts), sessions (search, rename, export), and side panels for Characters,
+Mind, Memory, Voice and Settings. It binds to `127.0.0.1` with a per-run secret token; Jarvis can run
 commands on your machine, so don't expose it to a network you don't trust
 (`--allow-remote` exists, with a warning).
 
@@ -188,6 +251,7 @@ Work in the web UI, the terminal UI and `--cli`:
 jarvis --web [--port 7777] [--no-browser]   # web UI
 jarvis                                       # terminal UI
 jarvis --cli                                 # plain terminal
+jarvis --daemon                              # headless: run routines in the background
 jarvis --doctor                              # check endpoint, config and mind
 jarvis-supervisor --cli                      # auto-restart on crash
 jarvis-mcp                                   # expose the tools as an MCP server (stdio)
@@ -197,9 +261,11 @@ jarvis-mcp                                   # expose the tools as an MCP server
 
 Settings come from `config.toml` (copy `config.example.toml`), then
 `mind/runtime_config.json` (what you change in the UI), then `JARVIS_*`
-environment variables. API keys are read from environment variables and never
-written to disk; the ChatGPT sign-in is stored in `~/.config/jarvis/` with
-owner-only permissions.
+environment variables. API keys you paste in the UI are saved to
+`~/.config/jarvis/keys.json` (owner-only permissions; untick *Remember on this
+computer* to keep a key for this session only) and win over environment
+variables; the ChatGPT sign-in is stored next to it. MCP servers live in
+`mind/mcp.json`.
 
 ## Where things live
 
@@ -207,6 +273,14 @@ owner-only permissions.
 jarvis/                 the agent
 ├── agent.py            core loop: message → model → tools → reply
 ├── tool_exposure.py    TurboMCP tool search (find_tools / call_tool)
+├── runtime.py          several agents in one process (profiles)
+├── file_tools.py       read_file / edit_file / grep / glob
+├── mcp_client.py       MCP servers from mind/mcp.json
+├── subagents.py        spawn_agent
+├── specialists/        Agents: plugin format, records, import/export
+├── agents_builtin/     built-in agents (Lead Finder)
+├── routines.py         scheduler for recurring tasks
+├── discussions.py      group discussions
 ├── providers/          chat-completions, ChatGPT sign-in, Anthropic
 ├── characters.py       character cards (import, edit, render)
 ├── context.py          system prompt built from mind/
@@ -219,7 +293,8 @@ jarvis/                 the agent
 └── ui.py               terminal UI
 mind/                   Jarvis's memory (personal, not committed)
 ├── self.md  user.md  system.md  MEMORY.md
-├── characters/  episodes/  facts/  skills/  sessions/  jobs/
+├── characters/  episodes/  facts/  skills/  sessions/
+├── agents/  agent_data/  routines/  discussions/  mcp.json
 tools/                  learned tools (hot-reloaded)
 models/                 downloaded voice/STT models (not committed)
 ```
@@ -235,6 +310,39 @@ ruff check .
 ---
 
 ## Changelog
+
+### 1.1.2 — 2026-11-25
+
+**New**
+- **Agents**: specialised agent plugins with a standard folder format
+  (`agent.toml`), settings, actions with inputs, records tables, exports,
+  optional tools and skills, and their own chat. Import from zip/GitHub/folder
+  with a review step, export, duplicate, create. Built-in **Lead Finder**.
+- **Routines** replace cron jobs: in-process scheduler, plain-English or cron
+  schedules with a live preview, agent actions as targets, run history,
+  notifications, catch-up after downtime, `jarvis --daemon`.
+- **Discussions**: agenda-driven group chats between 2–6 agents on any
+  providers, four modes, user participation, item summaries and minutes.
+- **Claude-style sidebar** with pages for Agents, Discussions, Routines and Tools.
+- **Saved API keys** ("Remember on this computer", Forget).
+- **Harness**: parallel read-only tool calls, `read_file` ranges, `edit_file`,
+  `grep`, `glob`, large outputs spilled to files, background commands, MCP
+  client, `spawn_agent` subagents, `web_search` (Serper/Brave/free) and
+  `fetch_page` with contact extraction, 50 tool rounds + Continue.
+
+**Improved**
+- DeepSeek thinking mode keeps its reasoning across tool calls.
+- Several agents can run at once; approvals reach the right one.
+
+### 1.1.1 — 2026-11-25
+
+- ChatGPT sign-in reports the real result; the UI only shows signed-in when
+  the plan is usable.
+- Settings: grouped provider list, searchable models, key status, Gemini key
+  field fixed, sensible default models.
+- Gemini tool calls keep their thought signatures.
+- Chat: live thinking, `<think>` parsing, tokens/sec, safe markdown, readable
+  errors, Stop keeps partial text, retry no longer duplicates messages.
 
 ### 1.1 — 2026-11-24
 
@@ -293,6 +401,9 @@ server, slash commands with a provider manager, and OpenAI-compatible providers
 
 ## Roadmap
 
+- **Code mode**: the model writes a short script that calls tools; only its
+  output returns to context (big savings for batch work).
+- **Sandbox**: optional bubblewrap isolation for shell commands.
 - **Skills & MCP marketplace**: browse ready-made skills and tools (for
   example "give it data, get a chart") from a GitHub catalog, install with one
   click, or add your own GitHub links.

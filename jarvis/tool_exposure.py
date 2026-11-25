@@ -14,6 +14,16 @@ META_TOOLS = ("find_tools", "call_tool", "read_skill")
 SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 MAX_LISTED = 60  # fallback listing size when a search matches nothing
 MAX_PROMPT_NAMES = 80
+# turbomcp's older web tools: web_search / fetch_page replace them, so the model sees one choice.
+LEGACY_HIDDEN = {"internet_search", "webpage_scrape"}
+# Tools that only read: calls to these in one reply may run concurrently.
+READ_ONLY_TOOLS = {
+    "read_file", "grep", "glob", "list_dir", "recall", "find_tools", "read_skill", "web_search",
+    "fetch_page", "spawn_agent", "command_output", "get_current_time", "calculate", "get_system_info",
+}
+MCP_PREFIX = "mcp__"
+# Old tool names kept callable but never listed (cron_* -> routine_*).
+ALIAS_TOOLS = frozenset({"cron_add", "cron_remove", "cron_list", "cron_status", "cron_enable", "cron_disable"})
 
 META_SCHEMAS = [
     {"type": "function", "function": {
@@ -47,13 +57,41 @@ def _one_line(text):
 
 
 class ToolExposure:
-    def __init__(self, registry, config, mind):
+    """What one agent sees. `profile` (optional AgentProfile) adds core_tools and
+    extra_tools (private callables, always directly visible) and hides hidden_tools."""
+
+    def __init__(self, registry, config, mind, profile=None):
         self.registry = registry
         self.config = config
         self.mind = Path(mind)
+        self.hidden = set(getattr(profile, "hidden_tools", None) or ()) | LEGACY_HIDDEN
+        self.can_spawn = profile is None or getattr(profile, "allow_spawn", True)
+        if not self.can_spawn:
+            self.hidden.add("spawn_agent")  # sub-agents cannot spawn (depth 1)
+        self.extra_core = list(getattr(profile, "core_tools", None) or ())
+        self.extras = None  # tiny private turbomcp registry: schemas derived like the main one
+        extra_tools = getattr(profile, "extra_tools", None) or {}
+        if extra_tools:
+            from turbomcp import TurboMCP
+            self.extras = TurboMCP(name="extras")
+            for name, func in extra_tools.items():
+                self.extras.register(func, name=name)
+                if isinstance(getattr(func, "input_schema", None), dict):  # e.g. records tools built from a manifest
+                    self.extras.tools[name]["input_schema"] = func.input_schema
         self._names = None
         self._tools = []
         self.refresh()
+
+    def _all_names(self):
+        """Registry tool names this agent may use (hidden removed, extras added)."""
+        names = [n for n in self.registry.tool_names() if n not in self.hidden and n not in ALIAS_TOOLS]
+        return names + [n for n in (self.extras.tools if self.extras else ()) if n not in names]
+
+    def _schemas(self, names):
+        extras = self.extras.tools if self.extras else {}
+        own = [n for n in names if n in extras]
+        base = self.registry.to_openai_tools([n for n in names if n not in extras])
+        return base + self.extras.to_openai_tools(own) if own else base
 
     @property
     def mode(self):
@@ -61,23 +99,27 @@ class ToolExposure:
 
     def core_names(self):
         """Configured core tools that actually exist, sorted."""
-        existing = set(self.registry.tool_names())
-        return sorted(n for n in self.config["agent"]["core_tools"] if n in existing)
+        existing = set(self._all_names())
+        wanted = [*self.config["agent"]["core_tools"], *self.extra_core, *(self.extras.tools if self.extras else ())]
+        if self.can_spawn:
+            wanted.append("spawn_agent")
+        return sorted({n for n in wanted if n in existing})
 
     def refresh(self):
         """Rebuild the tools array if the registry's tool set changed.
 
         Call only at the start of a user turn so rounds stay identical.
         """
-        names = tuple(sorted(self.registry.tool_names()))
+        names = tuple(sorted(self._all_names()))
         key = (names, self.mode, tuple(self.config["agent"]["core_tools"]))
         if key == self._names:
             return
         self._names = key
         if self.mode == "all":
-            self._tools = self.registry.to_openai_tools()
+            core = set(self.core_names())  # MCP tools stay out of the array unless made core
+            self._tools = self._schemas([n for n in names if not n.startswith(MCP_PREFIX) or n in core])
         else:
-            self._tools = self.registry.to_openai_tools(self.core_names()) + META_SCHEMAS
+            self._tools = self._schemas(self.core_names()) + META_SCHEMAS
 
     def tools(self):
         return self._tools
@@ -85,16 +127,21 @@ class ToolExposure:
     def hidden_names(self):
         """Non-core registry tool names (what find_tools can reveal)."""
         core = set(self.core_names())
-        return sorted(n for n in self.registry.tool_names() if n not in core)
+        return sorted(n for n in self._all_names() if n not in core)
 
     def prompt_section(self):
         """The '# Tools' system-prompt section ('' in all mode)."""
         if self.mode == "all":
             return ""
-        names = self.hidden_names()
+        all_names = self.hidden_names()
+        mcp = [n for n in all_names if n.startswith(MCP_PREFIX)]
+        names = [n for n in all_names if not n.startswith(MCP_PREFIX)]
         shown = ", ".join(names[:MAX_PROMPT_NAMES])
         if len(names) > MAX_PROMPT_NAMES:
             shown += f", ... (+{len(names) - MAX_PROMPT_NAMES} more, use find_tools)"
+        if mcp:
+            servers = sorted({n.split("__")[1] for n in mcp})
+            shown += f"; {len(mcp)} MCP tools from {', '.join(servers)} (find them with find_tools)"
         return (
             "# Tools\n"
             f"- Directly callable: {', '.join(self.core_names())}.\n"
@@ -104,6 +151,17 @@ class ToolExposure:
         )
 
     # ---------- execution ----------
+
+    def is_read_only(self, name):
+        """True for a (already unwrapped) tool that only reads, so it may run in parallel."""
+        if name in self.hidden:
+            return False
+        if name in READ_ONLY_TOOLS:
+            return True
+        if self.extras and name in self.extras.tools:
+            return False
+        tool = self.registry.get_registry().tools.get(name)
+        return bool(tool and getattr(tool["func"], "read_only", False))
 
     def unwrap(self, name, args):
         """Resolve a call_tool proxy to (inner_name, inner_args, via)."""
@@ -130,10 +188,20 @@ class ToolExposure:
             if name == "find_tools":
                 return self.find_tools(args.get("query", ""), args.get("top_n", 5))
             return self.read_skill(args.get("name", ""))
-        if name not in self.registry.tool_names():
-            close = [t["name"] for t in self.registry.search_tools(name, 5)["tools"]]
+        if self.extras and name in self.extras.tools:
+            return self._call_extra(name, args)
+        if name in self.hidden or name not in self.registry.tool_names():
+            close = [t["name"] for t in self.registry.search_tools(name, 5)["tools"]
+                     if t["name"] not in self.hidden]
             return {"error": f"Unknown tool: {name}", "did_you_mean": close}
         return self.registry.call(name, args)
+
+    def _call_extra(self, name, args):
+        from .validation import validate_arguments
+        error = validate_arguments(self.extras.tools[name].get("input_schema", {}), args)
+        if error:
+            return {"error": error, "validation_error": True, "tool": name}
+        return self.extras.call(name, args)
 
     def find_tools(self, query, top_n=5):
         try:
@@ -142,6 +210,7 @@ class ToolExposure:
             top_n = 5
         hidden = set(self.hidden_names())
         found = self.registry.search_tools(str(query), top_n + len(self.registry.tool_names()))
+        # hidden is already filtered (see hidden_names); extras are core, never listed here
         tools = [
             {"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]}
             for t in found["tools"] if t["name"] in hidden
@@ -151,7 +220,7 @@ class ToolExposure:
         names = self.hidden_names()
         listing = [
             {"name": n, "summary": _one_line(self.registry.get_capabilities(n)["description"])}
-            for n in names[:MAX_LISTED]
+            for n in names[:MAX_LISTED] if n in self.registry.tool_names()
         ]
         return {"query": query, "tools": [], "note": "No match. All other tools:", "available": listing}
 

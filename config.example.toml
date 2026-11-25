@@ -30,7 +30,7 @@ effort = ""
 
 [agent]
 # Max tool-call rounds per user message before Jarvis is told to wrap up
-max_tool_rounds = 20
+max_tool_rounds = 50
 # Summarize older conversation once the in-context transcript exceeds this many chars (~6k tokens)
 history_char_limit = 24000
 keep_recent = 8

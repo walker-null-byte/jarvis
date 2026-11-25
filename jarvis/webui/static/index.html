@@ -7,6 +7,10 @@
   <title>Jarvis</title>
   <link rel="stylesheet" href="/static/css/app.css">
   <link rel="stylesheet" href="/static/css/panels.css">
+  <link rel="stylesheet" href="/static/css/views.css">
+  <link rel="stylesheet" href="/static/css/agents.css">
+  <link rel="stylesheet" href="/static/css/discussions.css">
+  <link rel="stylesheet" href="/static/css/routines.css">
   <link rel="icon" href="data:,">
 </head>
 <body>
@@ -20,11 +24,18 @@
           <div class="brand-state" id="orb-state">idle</div>
         </div>
       </div>
-      <button id="new-chat" class="primary wide" type="button"><span class="btn-icon" data-icon="plus" data-size="16"></span>New chat <kbd>Ctrl+N</kbd></button>
-      <div class="search-wrap">
-        <span class="search-icon" data-icon="search" data-size="15"></span>
-        <input id="session-search" type="search" placeholder="Search chats" aria-label="Search conversations (Ctrl+K)">
-      </div>
+      <nav id="nav" aria-label="Main">
+        <button id="new-chat" class="nav-item" type="button"><span class="nav-icon" data-icon="plus" data-size="18"></span><span class="nav-label">New chat</span><kbd>Ctrl+N</kbd></button>
+        <button id="nav-search" class="nav-item" type="button" aria-expanded="false" aria-controls="search-wrap"><span class="nav-icon" data-icon="search" data-size="18"></span><span class="nav-label">Search</span><kbd>Ctrl+K</kbd></button>
+        <div class="search-wrap" id="search-wrap" hidden>
+          <input id="session-search" type="search" placeholder="Search chats" aria-label="Search conversations (Ctrl+K)">
+        </div>
+        <a class="nav-item" href="#/agents" data-route="agents"><span class="nav-icon" data-icon="agents" data-size="18"></span><span class="nav-label">Agents</span></a>
+        <a class="nav-item" href="#/discussions" data-route="discussions"><span class="nav-icon" data-icon="discussions" data-size="18"></span><span class="nav-label">Discussions</span></a>
+        <a class="nav-item" href="#/routines" data-route="routines"><span class="nav-icon" data-icon="routines" data-size="18"></span><span class="nav-label">Routines</span><span id="routines-badge" class="nav-badge" hidden></span></a>
+        <a class="nav-item" href="#/tools" data-route="tools"><span class="nav-icon" data-icon="wrench" data-size="18"></span><span class="nav-label">Tools</span></a>
+      </nav>
+      <button id="recents-toggle" class="recents-head" type="button" aria-expanded="true" aria-controls="sessions"><span>Recents</span><span class="recents-chevron" data-icon="down" data-size="14"></span></button>
       <ul id="sessions" class="sessions"></ul>
     </aside>
 
@@ -48,6 +59,7 @@
         <button id="toggle-drawer" class="icon-btn" type="button" aria-label="Toggle side panel" aria-expanded="true" title="Side panel" data-icon="panel" data-size="18"></button>
       </header>
       <div id="banner" class="banner" role="alert" hidden></div>
+      <div id="view" hidden></div>
       <div id="stage">
         <div id="transcript" role="log" aria-label="Conversation" aria-live="polite" tabindex="0"></div>
         <button id="jump" class="jump" type="button" hidden aria-label="Jump to latest message"><span data-icon="arrow-down" data-size="15"></span>Jump to latest</button>

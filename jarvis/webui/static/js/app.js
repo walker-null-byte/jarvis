@@ -11,13 +11,21 @@ import { Drawer, renderActivity } from "./panels.js";
 import { renderCharacters } from "./panel_characters.js";
 import { renderMemory, renderMind } from "./panel_mind.js";
 import { renderSettings } from "./panel_settings.js";
-import { renderJobs, renderTools } from "./panel_tools.js";
 import { renderVoice } from "./panel_voice.js";
+import { navigate, parseHash, replaceRoute, startRouter } from "./router.js";
 import { SessionList } from "./sessions.js";
 import { Switcher } from "./switcher.js";
+import { createBus, currentViewName, mountView, unmountView } from "./views.js";
+import "./view_agents.js";
+import "./view_discussions.js";
+import "./view_routines.js";
+import { initRoutineNotifier } from "./routine_notify.js";
+import "./view_tools.js";
 import { handleDownloadEvent, showDownloadPrompt, Voice } from "./voice.js";
 
 const $ = (id) => document.getElementById(id);
+const bus = createBus();
+initRoutineNotifier(bus); // sidebar badge + toasts for finished routines, on every page
 
 const ctx = {
   settings: {}, status: null, sessionId: "", busy: false, characters: [],
@@ -168,13 +176,16 @@ function shortLabel(id) {
 function updateHeader() {
   const s = ctx.status;
   if (!s) return;
-  $("title").textContent = s.session?.title || "New conversation";
-  document.title = `${s.session?.title || "Jarvis"} · Jarvis`;
+  ctx.sessionId = s.session?.id || ctx.sessionId;
+  if (!viewName) {
+    $("title").textContent = s.session?.title || "New conversation";
+    document.title = `${s.session?.title || "Jarvis"} · Jarvis`;
+    if (routeReady && ctx.sessionId) replaceRoute(`chat/${encodeURIComponent(ctx.sessionId)}`);
+  }
   $("model-label").textContent = `${shortLabel(s.provider)} · ${s.model || "no model"}`;
   $("model-pill").title = "Switch model or provider";
   const btn = $("character-btn");
   btn.replaceChildren(avatar(s.character || { name: "J" }, 22), el("span", { class: "pill-text", text: s.character?.name || "Jarvis" }), icon("down", 13));
-  ctx.sessionId = s.session?.id || ctx.sessionId;
 }
 
 async function loadProviderLabels() {
@@ -228,6 +239,7 @@ async function applySnapshot(snap) {
 }
 ctx.applySnapshot = applySnapshot;
 ctx.reloadSnapshot = async () => applySnapshot(await api("/snapshot"));
+ctx.navigate = navigate;
 ctx.closeRail = () => document.body.classList.remove("rail-open");
 ctx.showTour = () => openOnboarding(ctx);
 
@@ -249,8 +261,21 @@ async function showHero(character) {
 
 // ---------- live events ----------
 
+// Events that concern the whole app, not one chat session.
+const GLOBAL_KINDS = new Set([
+  "snapshot", "session_started", "config_changed", "character_changed",
+  "voice_download", "voice_listening", "voice_amplitude", "voice_state",
+]);
+const approvalToasts = new Map();
+
 function onMessage(msg) {
+  bus.emit(msg);
   const d = msg.data || {};
+  if (!GLOBAL_KINDS.has(msg.kind) && msg.session_id && ctx.sessionId && msg.session_id !== ctx.sessionId) {
+    otherSessionEvent(msg);
+    return;
+  }
+  if (msg.kind === "session_started" && d.session_kind && d.session_kind !== "chat") return; // a background agent, not this chat
   switch (msg.kind) {
     case "snapshot": applySnapshot(d); showBanner(""); return;
     case "session_started": if (msg.session_id !== ctx.sessionId) ctx.reloadSnapshot().catch(handleApiError); break;
@@ -279,6 +304,29 @@ function onMessage(msg) {
   drawer.notify(msg);
 }
 
+// An approval for a session that is not on screen must not hang silently: show a toast.
+function otherSessionEvent(msg) {
+  const d = msg.data || {};
+  if (msg.kind === "approval_finished") { approvalToasts.get(d.request_id)?.remove(); approvalToasts.delete(d.request_id); return; }
+  if (msg.kind !== "approval_requested" || approvalToasts.has(d.request_id)) return;
+  const decide = async (approved) => {
+    node.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+    try { await api(`/approvals/${d.request_id}`, { method: "POST", body: { approved } }); }
+    catch (error) { toast(error.message, "error"); }
+    node.remove();
+    approvalToasts.delete(d.request_id);
+  };
+  const node = el("div", { class: "toast approval-toast", role: "alertdialog", "aria-label": "Approval required" },
+    el("span", { text: `A background session needs approval: ${d.action || "action"}` }),
+    el("div", { class: "approval-actions" },
+      el("button", { class: "primary small", text: "Approve", onclick: () => decide(true) }),
+      el("button", { class: "danger small", text: "Deny", onclick: () => decide(false) })));
+  $("toasts").append(node);
+  approvalToasts.set(d.request_id, node);
+  const limit = (Number(ctx.settings["security.approval_timeout"]) || 120) * 1000 + 5000;
+  setTimeout(() => { node.remove(); approvalToasts.delete(d.request_id); }, limit);
+}
+
 // After a turn, message indexes are needed for editing; the DOM is not re-rendered.
 async function refreshIndexes() {
   try {
@@ -301,8 +349,6 @@ const drawer = new Drawer($("drawer"), [
   { id: "voice", label: "Voice", icon: "speaker", render: renderVoice },
   { id: "mind", label: "Mind", icon: "brain", render: renderMind },
   { id: "memory", label: "Memory", icon: "book", render: renderMemory },
-  { id: "tools", label: "Tools", icon: "terminal", render: renderTools },
-  { id: "jobs", label: "Jobs", icon: "clock", render: renderJobs },
   { id: "settings", label: "Settings", icon: "sliders", render: renderSettings },
 ], ctx);
 
@@ -317,7 +363,7 @@ function setDrawer(open) {
 }
 ctx.closeDrawer = () => setDrawer(false);
 ctx.openTab = (tab) => { setDrawer(true); drawer.show(tab); };
-const TABS = ["activity", "characters", "voice", "mind", "memory", "tools", "jobs", "settings"];
+const TABS = ["activity", "characters", "voice", "mind", "memory", "settings"];
 const savedTab = store.get("jarvis.tab");
 drawer.show(TABS.includes(savedTab) ? savedTab : "characters");
 setDrawer(store.get("jarvis.drawer") === "open" && !window.matchMedia("(max-width: 1100px)").matches);
@@ -459,10 +505,87 @@ async function cancelTurn() {
 }
 
 async function newChat() {
-  try { await applySnapshot(await api("/sessions", { method: "POST" })); input.focus(); }
-  catch (error) { toast(error.message, "error"); }
+  try {
+    await applySnapshot(await api("/sessions", { method: "POST" }));
+    navigate(`chat/${encodeURIComponent(ctx.sessionId)}`);
+    input.focus();
+  } catch (error) { toast(error.message, "error"); }
 }
 $("new-chat").addEventListener("click", () => { newChat(); ctx.closeRail(); });
+
+// ---------- search & recents (rail) ----------
+
+function openSearch(focus = true) {
+  $("search-wrap").hidden = false;
+  $("nav-search").setAttribute("aria-expanded", "true");
+  if (focus) { $("session-search").focus(); $("session-search").select(); }
+}
+function closeSearch() {
+  $("session-search").value = "";
+  $("search-wrap").hidden = true;
+  $("nav-search").setAttribute("aria-expanded", "false");
+  sessions.refresh();
+}
+$("nav").addEventListener("click", (event) => { if (event.target.closest("a.nav-item")) ctx.closeRail(); });
+$("nav-search").addEventListener("click", () => ($("search-wrap").hidden ? openSearch() : closeSearch()));
+$("session-search").addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { event.stopPropagation(); closeSearch(); $("nav-search").focus(); }
+});
+$("recents-toggle").addEventListener("click", () => {
+  const open = $("recents-toggle").getAttribute("aria-expanded") !== "true";
+  $("recents-toggle").setAttribute("aria-expanded", String(open));
+  $("sessions").hidden = !open;
+  store.set("jarvis.recents", open ? "open" : "closed");
+});
+if (store.get("jarvis.recents") === "closed") {
+  $("recents-toggle").setAttribute("aria-expanded", "false");
+  $("sessions").hidden = true;
+}
+
+// ---------- view router ----------
+
+let viewName = "";
+let routeReady = false;
+const VIEW_TITLES = { agents: "Agents", discussions: "Discussions", routines: "Routines", tools: "Tools" };
+const viewCtx = {
+  api, bus, toast, navigate,
+  setTitle(text) { if (viewName) { $("title").textContent = text; document.title = `${text} · Jarvis`; } },
+};
+
+function markNav(name) {
+  for (const item of document.querySelectorAll("#nav [data-route]")) {
+    const on = item.dataset.route === name;
+    item.classList.toggle("active", on);
+    if (on) item.setAttribute("aria-current", "page"); else item.removeAttribute("aria-current");
+  }
+}
+
+async function onRoute(route) {
+  if (route.view) {
+    viewName = route.name;
+    document.body.classList.add("view-mode");
+    $("view").hidden = false;
+    $("title").textContent = VIEW_TITLES[route.name];
+    document.title = `${VIEW_TITLES[route.name]} · Jarvis`;
+    markNav(route.name);
+    mountView(route.name, $("view"), route.params, viewCtx);
+    return;
+  }
+  const wasView = viewName;
+  viewName = "";
+  unmountView();
+  $("view").hidden = true;
+  document.body.classList.remove("view-mode");
+  markNav("");
+  const sid = route.params.sid;
+  if (sid && sid !== ctx.sessionId) {
+    try { await applySnapshot(await api(`/sessions/${encodeURIComponent(sid)}/resume`, { method: "POST" })); }
+    catch (error) { toast(error.message, "error"); await refreshStatus(); }
+  } else if (wasView) { updateHeader(); sessions.refresh(); }
+  if (ctx.sessionId) replaceRoute(`chat/${encodeURIComponent(ctx.sessionId)}`);
+  routeReady = true;
+  if (wasView) input.focus();
+}
 
 // ---------- push-to-talk ----------
 
@@ -497,7 +620,7 @@ mic.addEventListener("keyup", (e) => { if (e.key === " ") micStop(); });
 
 document.addEventListener("keydown", (event) => {
   const mod = event.ctrlKey || event.metaKey;
-  if (mod && event.key.toLowerCase() === "k") { event.preventDefault(); $("session-search").focus(); }
+  if (mod && event.key.toLowerCase() === "k") { event.preventDefault(); openSearch(); }
   else if (mod && event.key.toLowerCase() === "n") { event.preventDefault(); newChat(); }
   else if (event.key === "Escape") {
     if (document.querySelector("dialog[open]")) return; // dialogs close themselves
@@ -516,8 +639,10 @@ async function boot() {
     ctx.settings = (await api("/settings")).settings;
   } catch (error) { handleApiError(error); }
   loadProviderLabels();
+  await refreshStatus();
+  startRouter(onRoute);
   sessions.refresh();
-  input.focus();
+  if (!viewName) input.focus();
 }
 
 boot();

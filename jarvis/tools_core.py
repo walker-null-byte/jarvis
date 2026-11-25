@@ -9,11 +9,12 @@ import time
 from pathlib import Path
 
 from turbomcp import TurboMCP
+from jarvis import toolctx
 from jarvis.policy import CapabilityPolicy
 from jarvis.config import load_config
 
 
-def _run_command(command: str, timeout: int = 60, policy=None, cancel_event=None):
+def _run_command(command: str, timeout: int = 60, policy=None, cancel_event=None, background: bool = False):
     """Run a shell command on this computer and capture its output.
 
     Args:
@@ -28,6 +29,9 @@ def _run_command(command: str, timeout: int = 60, policy=None, cancel_event=None
             "run_command", {"command": command, "timeout": timeout}
         ):
             return {"error": "Command was not approved", "approval_required": True}
+    if background:
+        from jarvis.bg_commands import JOBS
+        return JOBS.start(command)
     try:
         process = subprocess.Popen(
             command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -131,56 +135,21 @@ def list_dir(path: str = "."):
     return _list_dir(path, CapabilityPolicy(load_config()))
 
 
-def cron_add(name: str, schedule: str, instruction: str):
-    """Add a scheduled cron job that runs a headless Jarvis turn.
-
-    The job will execute the instruction at the given schedule.
-
-    Args:
-        name (str): Job name (kebab-case, used as filename)
-        schedule (str): Cron schedule expression (e.g., "0 2 * * *" for 2am daily)
-        instruction (str): Natural language instruction for Jarvis to execute
-    """
-    from jarvis.jobs import cron_add as _cron_add
-    return _cron_add(name, schedule, instruction)
-
-
-def cron_remove(name: str):
-    """Remove a scheduled cron job by name."""
-    from jarvis.jobs import cron_remove as _cron_remove
-    return _cron_remove(name)
-
-
-def cron_list():
-    """List all scheduled cron jobs."""
-    from jarvis.jobs import cron_list as _cron_list
-    return _cron_list()
-
-
-def cron_status(name: str):
-    """Show scheduler and last-run status for one scheduled job."""
-    from jarvis.jobs import cron_status as _cron_status
-    return _cron_status(name)
-
-
-def cron_enable(name: str):
-    """Enable a disabled cron job."""
-    from jarvis.jobs import cron_enable as _cron_enable
-    return _cron_enable(name)
-
-
-def cron_disable(name: str):
-    """Disable a cron job without removing it."""
-    from jarvis.jobs import cron_disable as _cron_disable
-    return _cron_disable(name)
-
-
 def build_registry(mind=None, config=None):
     registry = TurboMCP(name="jarvis")
     policy = CapabilityPolicy(config)
 
-    def guarded_run_command(command: str, timeout: int = 60):
-        return _run_command(command, timeout, policy, getattr(registry, "_cancel_event", None))
+    def guarded_run_command(command: str, timeout: int = 60, background: bool = False):
+        """Run a shell command on this computer and capture its output.
+
+        Args:
+            command (str): The shell command to run (bash syntax)
+            timeout (int): Seconds to wait before giving up (ignored when background is true)
+            background (bool): Start it detached and return a job_id at once; for builds, servers and long scripts. Then use command_output / command_kill.
+        """
+        ctx = toolctx.current()
+        cancel = (ctx.cancel_event if ctx and ctx.cancel_event else None) or getattr(registry, "_cancel_event", None)
+        return _run_command(command, timeout, policy, cancel, background)
 
     def guarded_write_file(file_path: str, content: str, append: bool = False):
         return _write_file(file_path, content, append, policy)
@@ -188,31 +157,26 @@ def build_registry(mind=None, config=None):
     def guarded_list_dir(path: str = "."):
         return _list_dir(path, policy)
 
-    registry.register(guarded_run_command, name="run_command", description=run_command.__doc__)
+    registry.register(guarded_run_command, name="run_command")
     registry.register(guarded_write_file, name="write_file", description=write_file.__doc__)
     registry.register(guarded_list_dir, name="list_dir", description=list_dir.__doc__)
-    for func in (cron_add, cron_remove, cron_list, cron_status, cron_enable, cron_disable):
-        registry.register(func)
+    from jarvis.routines import register_routine_tools  # routine_* tools + hidden cron_* aliases
+    register_routine_tools(registry, config)
     # From turbomcp: read_file, calculate, get_current_time, get_system_info,
     # internet_search, webpage_scrape (the web ones need the [web] extra).
     registry.register_default(all=True)
-    # Guard default file/network tools with the same capability policy
+    # Coding tools replace turbomcp's read_file; all go through the capability policy.
+    from jarvis.file_tools import build_file_tools
+    from jarvis.bg_commands import command_output, command_kill
+    from jarvis import subagents, web_tools
     if "read_file" in registry.tools:
-        def _guarded_read_file(file_path: str):
-            """Read a file (policy-guarded)."""
-            err, p = policy.check_path(file_path)
-            if err:
-                return {"error": err, "blocked": True}
-            try:
-                return Path(p).read_text(encoding="utf-8")[:12000]
-            except Exception as e:
-                return {"error": str(e)}
-        # Replace the default implementation while keeping its schema
-        try:
-            registry.unregister("read_file")
-        except Exception:
-            pass
-        registry.register(_guarded_read_file, name="read_file", description="Read a text file (guarded by allowed roots).")
+        registry.unregister("read_file")
+    for func in build_file_tools(policy):
+        registry.register(func)
+    for func in (command_output, command_kill, subagents.spawn_agent,
+                 web_tools.web_search, web_tools.fetch_page):
+        registry.register(func)
+    guarded_list_dir.read_only = True
     registry._jarvis_policy = policy
     registry._cancel_event = None
     if mind is not None:

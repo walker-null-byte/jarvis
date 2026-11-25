@@ -111,7 +111,7 @@ def post_regenerate(state: WebState = Depends(web)):
 
 @router.post("/approvals/{request_id}")
 def post_approval(request_id: str, body: ApprovalBody, state: WebState = Depends(web)):
-    if not state.jarvis.approvals.resolve(request_id, body.approved):
+    if not state.resolve_approval(request_id, body.approved):
         fail(404, "No such pending approval")
     return {"resolved": True, "approved": body.approved}
 
@@ -149,13 +149,16 @@ def _require_idle(state):
 
 
 @router.get("/sessions")
-def list_sessions(q: str = "", state: WebState = Depends(web)):
-    sessions = state.jarvis.sessions.search(q, limit=100) if q.strip() else state.jarvis.sessions.list()
+def list_sessions(q: str = "", kind: str = "chat", owner: str | None = None,
+                  state: WebState = Depends(web)):
+    """Sessions of one kind (default chat; kind=all for everything), optionally one owner's."""
+    store = state.jarvis.sessions
+    sessions = store.search(q, 100, kind, owner) if q.strip() else store.list(kind, owner)
     active = state.jarvis.session_id
     # A brand-new session isn't on disk until its first message; still show it.
     if not q.strip() and all(item.get("id") != active for item in sessions):
-        current = state.jarvis.sessions.get(active)
-        if current:
+        current = store.get(active)
+        if current and store._wanted(current, kind, owner):
             sessions = [current, *sessions]
     return {"sessions": [{**item, "active": item.get("id") == active} for item in sessions],
             "active": active}

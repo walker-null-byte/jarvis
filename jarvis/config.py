@@ -10,6 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# The core_tools list shipped before 1.1.2; configs still holding exactly this get the new one.
+OLD_CORE_TOOLS = ["run_command", "read_file", "write_file", "list_dir", "remember", "recall"]
+NEW_CORE_TOOLS = ["run_command", "read_file", "edit_file", "write_file", "grep", "glob",
+                  "remember", "recall", "routine_create"]
+
 DEFAULTS = {
     "llm": {
         "base_url": "http://localhost:1234/v1",
@@ -26,7 +31,10 @@ DEFAULTS = {
         "effort": "",
     },
     "agent": {
-        "max_tool_rounds": 20,
+        "max_tool_rounds": 50,
+        # Run read-only tool calls from one reply concurrently (at most max_parallel_tools).
+        "parallel_tools": True,
+        "max_parallel_tools": 6,
         # Summarize older history once the transcript exceeds this many chars
         # (~6k tokens), keeping at least this many recent messages verbatim.
         "history_char_limit": 24000,
@@ -35,10 +43,7 @@ DEFAULTS = {
         # model discover the rest through TurboMCP search (saves context).
         # "all": send every tool schema every request (legacy; for weak models).
         "tool_mode": "search",
-        "core_tools": [
-            "run_command", "read_file", "write_file", "list_dir",
-            "remember", "recall",
-        ],
+        "core_tools": list(NEW_CORE_TOOLS),
         # Default character card id for new sessions (see mind/characters/)
         "character": "jarvis",
         # Cap on how much of MEMORY.md goes into the system prompt
@@ -65,6 +70,7 @@ DEFAULTS = {
         "max_command_timeout": 300,
         "approval_timeout": 120,
     },
+    "routines": {"enabled": True, "tick_seconds": 20, "max_concurrent": 2},
     "jobs": {
         "backend": "private-file",
         "crontab_file": "~/.jarvis_crontab",
@@ -86,6 +92,10 @@ def load_config():
         for section, values in user.items():
             config.setdefault(section, {}).update(values)
     _apply_runtime_overrides(config)
+    if config["agent"].get("core_tools") == OLD_CORE_TOOLS:
+        config["agent"]["core_tools"] = list(NEW_CORE_TOOLS)  # also covers saved runtime overrides
+    if config["agent"].get("max_tool_rounds") == 20:  # the 1.1 default, saved by older settings
+        config["agent"]["max_tool_rounds"] = DEFAULTS["agent"]["max_tool_rounds"]
     _apply_environment(config)
     _validate_config(config)
     return config

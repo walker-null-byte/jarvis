@@ -30,6 +30,10 @@ export function renderSettings(container, ctx) {
     "aria-label": "API key", "aria-describedby": "provider-key-status" });
   const keyLabel = el("span", { text: "API key" });
   const keyField = el("label", { class: "field" }, keyLabel, keyInput);
+  const remember = el("input", { type: "checkbox", checked: true, id: "settings-remember" });
+  remember.addEventListener("change", updateKeyStatus);
+  const rememberRow = el("label", { class: "check-row", for: "settings-remember" }, remember,
+    el("span", { text: "Remember on this computer" }));
   const modelBox = new ComboBox({ label: "Model", placeholder: "model id", onfocus: () => ensureModels() });
   const refreshModels = el("button", { type: "button", class: "icon-btn", "aria-label": "Reload model list", title: "Reload model list" }, icon("redo", 16));
   const modelField = el("div", { class: "field" }, el("label", { for: "settings-model" }, el("span", { text: "Model" })),
@@ -55,7 +59,7 @@ export function renderSettings(container, ctx) {
   const providerField = el("div", { class: "field" }, el("span", { text: "Provider" }), provider.node);
   container.append(
     el("h4", { text: "Provider" }), providerField, description,
-    baseUrlField, keyField, keyStatus, modelField, advanced,
+    baseUrlField, keyField, rememberRow, keyStatus, modelField, advanced,
     el("div", { class: "btn-row" }, apply, test), result, chatgpt,
     el("h4", { text: "Voice" }),
     el("p", { class: "note" }, "Voice engine, models and Auto-speak live in the ",
@@ -92,16 +96,29 @@ export function renderSettings(container, ctx) {
   }
 
   // ---- key status ----
-  function setKeyStatus(kind, text) {
+  function setKeyStatus(kind, text, action) {
     const names = { ok: "check", bad: "alert", info: "info" };
     keyStatus.className = `key-status ${kind}`;
-    keyStatus.replaceChildren(icon(names[kind], 15), el("span", { text }));
+    keyStatus.replaceChildren(icon(names[kind], 15), el("span", { text }), ...(action ? [action] : []));
+  }
+
+  // Delete the saved key of the chosen provider (the value never reaches the page, only a hint).
+  function forgetButton(p) {
+    return el("button", { type: "button", class: "link-btn", text: "Forget", "aria-label": `Forget saved key ${p.saved_hint}`,
+      onclick: async () => {
+        try {
+          await api(`/keys/${encodeURIComponent(p.api_key_env)}`, { method: "DELETE" });
+          keyRejected = false;
+          toast("Saved key removed");
+          await load({ keepResult: true });
+        } catch (error) { toast(error.message, "error"); }
+      } });
   }
 
   function hasKey(p) {
     if (!usesKey(p) || p.id === "custom") return true;  // custom endpoints often need no key
     if (keyInput.value.trim()) return true;
-    if (p.env_set) return true;
+    if (p.env_set || p.saved) return true;
     return p.id === live.provider && (info.session_key || info.active_key_env_set);
   }
 
@@ -115,8 +132,10 @@ export function renderSettings(container, ctx) {
     const p = chosen();
     keyStatus.hidden = !p || p.backend === "chatgpt";
     if (keyStatus.hidden) return;
+    rememberRow.hidden = keyField.hidden || !p.api_key_env;
     if (keyRejected && !keyInput.value.trim()) {
-      setKeyStatus("bad", "The provider rejected this key. Paste a valid one and try again.");
+      setKeyStatus("bad", p.saved ? `The provider rejected the saved key ${p.saved_hint}. Paste a valid one or forget it.`
+        : "The provider rejected this key. Paste a valid one and try again.", p.saved ? forgetButton(p) : null);
       return;
     }
     if (!usesKey(p)) { setKeyStatus("info", "No API key needed for a local server."); return; }
@@ -127,8 +146,10 @@ export function renderSettings(container, ctx) {
     }
     if (typed) {
       setKeyStatus("info", ENV_NAME.test(typed) && typed === typed.toUpperCase() && typed.length > 3
-        ? `Will use the environment variable ${typed}.` : "Key ready. It is kept for this session only, never saved to disk.");
-    } else if (p.env_set) setKeyStatus("ok", `Using ${p.api_key_env} from your environment.`);
+        ? `Will use the environment variable ${typed}.` : remember.checked && p.api_key_env
+          ? "Key ready. It will be saved on this computer when you apply." : "Key ready. It is kept for this session only, never saved to disk.");
+    } else if (p.saved) setKeyStatus("ok", `Saved key ${p.saved_hint}`, forgetButton(p));
+    else if (p.env_set) setKeyStatus("ok", `Using ${p.api_key_env} from your environment.`);
     else if (p.id === live.provider && info.active_key_env_set) setKeyStatus("ok", `Using ${info.active_key_env} from your environment.`);
     else if (p.id === live.provider && info.session_key) setKeyStatus("ok", "Key set for this session.");
     else setKeyStatus("bad", p.api_key_env ? `No key yet. Paste one, or set ${p.api_key_env} and restart.` : "No key yet. Paste one above.");
@@ -145,6 +166,7 @@ export function renderSettings(container, ctx) {
     endpointShown.value = p ? p.base_url : "";
     advanced.open = false;
     keyField.hidden = !usesKey(p);
+    rememberRow.hidden = keyField.hidden || !p?.api_key_env;
     keyLabel.textContent = isCustom() ? "API key (optional)" : "API key";
     keyInput.value = "";
     keyInput.placeholder = p && p.api_key_env ? `Paste your key (or leave empty to use ${p.api_key_env})` : "Paste your key";
@@ -217,7 +239,7 @@ export function renderSettings(container, ctx) {
     run(apply, async () => {
       const name = shortName(chosen());
       show("busy", `Switching to ${name}…`);
-      const out = await api("/provider", { method: "POST", body: requestBody({ model: modelBox.value.trim() }) });
+      const out = await api("/provider", { method: "POST", body: requestBody({ model: modelBox.value.trim(), remember: remember.checked }) });
       ctx.setStatus(out.status);
       const model = out.status?.model ? ` · ${out.status.model}` : "";
       if (out.ok === false) { show("bad", `Using ${name}${model}, but the connection test failed: ${out.message}`, out.output) }

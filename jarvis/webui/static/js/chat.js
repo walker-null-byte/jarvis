@@ -16,6 +16,12 @@ const SUGGESTIONS = [
 ];
 
 // One-line summary of a tool call's arguments: path=".", name="x"
+// A spawn_agent result is JSON that names the sub-agent's session.
+function subagentOf(text) {
+  const match = /"session_id":\s*"([^"]+)"/.exec(String(text || ""));
+  return match ? match[1] : "";
+}
+
 function firstLine(args) {
   const parts = Object.entries(args || {}).map(([key, value]) => {
     const text = typeof value === "string" ? value : JSON.stringify(value);
@@ -103,6 +109,7 @@ export class Chat {
     this.cur = null;          // current assistant record
     this.streamed = false;    // text streamed since the last tool call
     this.running = new Map(); // tool name -> [cards waiting for a result]
+    this.byCall = new Map();  // call_id -> running card (parallel tool calls finish out of order)
     this.approvals = new Map();
     this.renderQueued = new Set();
     this.records = new Map();
@@ -474,11 +481,12 @@ export class Chat {
     const state = running ? "running" : (item.status === "pending" ? "done" : item.status || "done");
     const status = el("span", { class: `tool-status ${state}`, text: state });
     const spin = el("span", { class: "spin", "aria-hidden": "true" });
+    const hint = el("span", { class: "tool-hint", text: firstLine(item.args) });
     const summary = el("summary", {},
       el("span", { class: "tool-icon" }, icon("terminal", 13)),
       el("span", { class: "tool-name", text: item.name }),
       item.via ? el("span", { class: "badge", text: `via ${item.via}` }) : null,
-      el("span", { class: "tool-hint", text: firstLine(item.args) }),
+      hint,
       spin, status, el("span", { class: "tool-time" }));
     const result = el("pre", { class: "tool-result", text: item.result ?? "" });
     const card = el("details", { class: `tool ${state}` }, summary,
@@ -489,20 +497,54 @@ export class Chat {
     cur.body.append(card);
     cur.seg = null;
     this.scrollDown();
-    return { card, status, result, time: summary.querySelector(".tool-time"), started: performance.now() };
+    const entry = { card, summary, hint, status, result, time: summary.querySelector(".tool-time"), started: performance.now() };
+    if (item.name === "spawn_agent" && item.result) this.subagentLink(entry, subagentOf(item.result));
+    return entry;
   }
 
   toolStarted(data) {
     this.streamed = false;
     const card = this.toolCard({ name: data.name, args: data.args, via: data.via, status: "running" }, true);
+    card.callId = data.call_id || "";
+    if (card.callId) this.byCall.set(card.callId, card);
     if (!this.running.has(data.name)) this.running.set(data.name, []);
     this.running.get(data.name).push(card);
   }
 
+  // "Open transcript" link on a spawn_agent card (the sub-agent's chat is #/chat/<session>).
+  subagentLink(entry, sessionId) {
+    if (!sessionId || entry.link) return;
+    entry.link = el("a", { class: "tool-link", href: `#/chat/${encodeURIComponent(sessionId)}`, text: "Open transcript",
+      onclick: (event) => event.stopPropagation() });
+    entry.hint.after(entry.link);
+  }
+
+  subagentEvent(data, started) {
+    const entry = this.byCall.get(data.call_id);
+    if (!entry) return;
+    this.subagentLink(entry, data.session_id);
+    if (!started) {
+      const n = data.tool_calls || 0;
+      entry.hint.textContent = `${n} tool call${n === 1 ? "" : "s"}…${data.last_tool ? ` ${data.last_tool}` : ""}`;
+    }
+  }
+
   toolFinished(data) {
+    // Match by call_id (parallel calls finish in any order); older events fall back to the name queue.
+    let card = data.call_id ? this.byCall.get(data.call_id) : null;
     const queue = this.running.get(data.name) || [];
-    const card = queue.shift() || this.toolCard({ name: data.name, args: data.args, via: data.via });
+    if (card) {
+      this.byCall.delete(data.call_id);
+      const at = queue.indexOf(card);
+      if (at >= 0) queue.splice(at, 1);
+    } else {
+      card = queue.shift() || this.toolCard({ name: data.name, args: data.args, via: data.via });
+    }
     const text = typeof data.result === "string" ? data.result : formatJson(data.result);
+    if (data.name === "spawn_agent") {
+      this.subagentLink(card, subagentOf(text));
+      card.hint.textContent = firstLine(data.args);
+    }
     const failed = /^(Error|Tool arguments were not valid)/.test(text);
     const state = failed ? "error" : "done";
     card.status.className = `tool-status ${state}`;
@@ -596,6 +638,17 @@ export class Chat {
     this.add(el("div", { class: "turn-note", text }));
   }
 
+  // The tool budget ran out: offer to carry on (sends a normal message).
+  continueNote() {
+    const button = el("button", { type: "button", class: "small", text: "Continue", onclick: () => {
+      node.remove();
+      this.hooks.suggest("Continue where you left off.");
+    } });
+    const node = el("div", { class: "turn-note continue-note" },
+      el("span", { text: "Tool budget for this turn was used up. " }), button);
+    this.add(node);
+  }
+
   // ---------- live events ----------
 
   handle(msg) {
@@ -615,7 +668,7 @@ export class Chat {
         break;
       }
       case "turn_started":
-        for (const old of this.root.querySelectorAll(".error-banner")) old.remove(); // a retry replaces the old error
+        for (const old of this.root.querySelectorAll(".error-banner, .continue-note")) old.remove(); // a retry replaces the old error
         this.beginTurn();
         break;
       case "assistant_delta": this.streamed = true; this.addText(data.content); break;
@@ -625,6 +678,8 @@ export class Chat {
         break;
       case "tool_started": this.toolStarted(data); break;
       case "tool_finished": this.toolFinished(data); break;
+      case "subagent_started": this.subagentEvent(data, true); break;
+      case "subagent_progress": this.subagentEvent(data, false); break;
       case "artifact_created": this.artifactCard(data.artifact); break;
       case "approval_requested": this.approvalRequested(data); break;
       case "approval_finished": this.approvalFinished(data); break;
@@ -632,7 +687,7 @@ export class Chat {
       case "error": this.errorBanner(data); break;
       case "turn_finished":
         if (data.status === "cancelled") this.note("Turn cancelled");
-        if (data.status === "budget_exhausted") this.note("Tool budget for this turn was used up");
+        if (data.status === "budget_exhausted") this.continueNote();
         break;
     }
   }

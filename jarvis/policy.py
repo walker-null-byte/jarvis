@@ -4,6 +4,7 @@ import os
 import re
 from pathlib import Path
 
+from . import toolctx
 from .config import ROOT
 
 
@@ -51,10 +52,14 @@ class CapabilityPolicy:
     def request_approval(self, action, payload, session_id="", turn_id=""):
         if self.mode == "permissive":
             return True
-        if not self._approval:
+        ctx = toolctx.current()
+        approval = (ctx.approvals if ctx and ctx.approvals else None) or self._approval
+        if not approval:
             return False
-        self._approval.timeout = self.approval_timeout
-        return self._approval.request(action, payload, session_id, turn_id)
+        if ctx:  # route the request to the agent that is running this tool
+            session_id, turn_id = session_id or ctx.session_id, turn_id or ctx.turn_id
+        approval.timeout = self.approval_timeout
+        return approval.request(action, payload, session_id, turn_id)
 
     def command_requires_approval(self, command):
         if self.mode == "permissive":

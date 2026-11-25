@@ -148,6 +148,9 @@ export function openOnboarding(ctx) {
     const providerSel = new Select({ label: "API provider", placeholder: "Loading…", onchange: () => syncKeyHint() });
     const keyNote = el("p", { class: "key-status", role: "status" });
     const keyInput = el("input", { type: "password", autocomplete: "new-password", spellcheck: false, placeholder: "Paste your key", "aria-label": "API key" });
+    const remember = el("input", { type: "checkbox", checked: true, id: "onboarding-remember" });
+    const rememberRow = el("label", { class: "check-row", for: "onboarding-remember" }, remember,
+      el("span", { text: "Remember on this computer" }));
     const keyUse = el("button", { type: "button", class: "primary", text: "Use this provider" });
     let providers = [];
     api("/providers").then((data) => {
@@ -160,15 +163,17 @@ export function openOnboarding(ctx) {
       const p = providers.find((q) => q.id === providerSel.value);
       const envName = p?.api_key_env;
       keyInput.placeholder = envName ? `Paste your key (or leave empty to use ${envName})` : "Paste your key";
-      keyNote.className = `key-status ${p?.env_set ? "ok" : ""}`;
-      keyNote.replaceChildren(...(p ? [icon(p.env_set ? "check" : "info", 15),
-        el("span", { text: p.env_set ? `Using ${envName} from your environment.` : "A pasted key is kept for this session only, never saved to disk." })] : []));
+      const have = p?.saved || p?.env_set;
+      keyNote.className = `key-status ${have ? "ok" : ""}`;
+      const text = p?.saved ? `Saved key ${p.saved_hint}` : p?.env_set ? `Using ${envName} from your environment.`
+        : "Paste a key. Tick the box to keep it on this computer; otherwise it lasts for this session only.";
+      keyNote.replaceChildren(...(p ? [icon(have ? "check" : "info", 15), el("span", { text })] : []));
     }
     keyUse.addEventListener("click", () => {
       const chosen = providers.find((p) => p.id === providerSel.value);
       if (!chosen) return;
       const typed = keyInput.value.trim();
-      if (!typed && !chosen.env_set) {
+      if (!typed && !chosen.env_set && !chosen.saved) {
         keyNote.className = "key-status bad";
         keyNote.replaceChildren(icon("alert", 15), el("span", { text: "Paste an API key first." }));
         keyInput.focus();
@@ -176,13 +181,15 @@ export function openOnboarding(ctx) {
       }
       // Keep the real preset (its backend matters, e.g. Anthropic); the server
       // applies the typed env var name or session-only key on top of it.
-      const body = typed ? { provider: chosen.id, api_key_env: typed } : { provider: chosen.id };
-      useProvider(body, shortName(chosen)).then(() => { keyInput.value = ""; });
+      const body = typed ? { provider: chosen.id, api_key_env: typed, remember: remember.checked } : { provider: chosen.id };
+      useProvider(body, shortName(chosen)).then(() => { keyInput.value = ""; return api("/providers"); })
+        .then((data) => { providers = data.providers.filter((p) => p.kind === "api_key" && p.id !== "custom"); syncKeyHint(); })
+        .catch(() => {});
     });
     keyBox.append(el("p", { class: "note", text: "Pay-as-you-go keys from OpenAI, Google, Anthropic, OpenRouter and others." }),
       el("div", { class: "field" }, el("span", { text: "Provider" }), providerSel.node),
       el("label", { class: "field" }, el("span", { text: "API key" }), keyInput),
-      keyNote, el("div", { class: "row" }, keyUse));
+      rememberRow, keyNote, el("div", { class: "row" }, keyUse));
 
     async function useProvider(body, label) {
       result.replaceChildren(el("span", { class: "note", text: `Connecting to ${label}…` }));

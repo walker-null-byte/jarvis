@@ -25,7 +25,7 @@ class SessionStore:
         # files. The first append() writes them to disk.
         self._pending = {}
 
-    def create(self, title="New conversation", character="jarvis"):
+    def create(self, title="New conversation", character="jarvis", kind="chat", owner=""):
         session_id = uuid.uuid4().hex[:12]
         now = datetime.datetime.now().isoformat(timespec="seconds")
         self._pending[session_id] = {
@@ -35,6 +35,8 @@ class SessionStore:
             "updated": now,
             "message_count": 0,
             "character": character,
+            "kind": kind or "chat",
+            "owner": owner or "",
         }
         return session_id
 
@@ -125,23 +127,31 @@ class SessionStore:
         except json.JSONDecodeError:
             return None
 
-    def list(self):
+    @staticmethod
+    def _wanted(item, kind, owner):
+        """kind None/"all" matches every kind; sessions without a kind are chats."""
+        if kind not in (None, "", "all") and (item.get("kind") or "chat") != kind:
+            return False
+        return owner is None or (item.get("owner") or "") == owner
+
+    def list(self, kind="chat", owner=None):
+        """Sessions newest first. kind=None or "all" returns every kind."""
         sessions = []
         for path in self.root.glob("*.json"):
             try:
                 item = json.loads(path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 continue
-            if item.get("id"):
+            if item.get("id") and self._wanted(item, kind, owner):
                 sessions.append(item)
         sessions.sort(key=lambda item: item.get("updated", ""), reverse=True)
         return sessions
 
-    def search(self, query="", limit=20):
+    def search(self, query="", limit=20, kind="chat", owner=None):
         """Return recent sessions whose metadata or messages match ``query``."""
         query = (query or "").strip().casefold()
         matches = []
-        for item in self.list():
+        for item in self.list(kind, owner):
             if not query:
                 matches.append(item)
             elif self._matches(item["id"], query):
@@ -254,3 +264,25 @@ class SessionStore:
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         temporary.replace(path)
+
+
+class MemorySessions(SessionStore):
+    """Session store that never touches disk (profile.persist=False)."""
+
+    def __init__(self):
+        self._pending = {}
+
+    def append(self, session_id, message):
+        pass
+
+    def load(self, session_id):
+        return []
+
+    def truncate_tail(self, session_id, n):
+        return 0
+
+    def list(self, kind="chat", owner=None):
+        return []
+
+    def exists(self, session_id):
+        return session_id in self._pending

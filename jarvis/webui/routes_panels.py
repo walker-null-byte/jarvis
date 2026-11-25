@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import re
 import shlex
 
 import json
@@ -326,6 +327,7 @@ class ProviderBody(BaseModel):
     base_url: str = ""
     model: str = ""
     api_key_env: str = ""
+    remember: bool = False  # save a typed literal key in the keystore under the provider's env name
 
 
 class TestBody(BaseModel):
@@ -359,6 +361,13 @@ def _env_is_set(name):
     return bool(name) and bool(os.environ.get(name))
 
 
+def _key_info(name):
+    """Saved-key facts for one env name: booleans and the last four characters only."""
+    from .. import keystore
+    return {"saved": bool(name) and keystore.get(name) is not None,
+            "saved_hint": keystore.hint(name) if name else ""}
+
+
 @router.get("/providers")
 def list_providers(state: WebState = Depends(web)):
     active = state.jarvis.config["llm"].get("provider", "custom")
@@ -369,20 +378,70 @@ def list_providers(state: WebState = Depends(web)):
                   "base_url": preset.get("base_url", ""),
                   "api_key_env": preset.get("api_key_env", ""),
                   "env_set": _env_is_set(preset.get("api_key_env", "")),
+                  **_key_info(preset.get("api_key_env", "")),
                   "description": preset.get("description", ""),
                   "default_model": preset.get("default_model", ""),
                   "backend": preset.get("backend", "chat")}
                  for name, preset in ordered]
     providers.append({"id": "custom", "label": "Custom — any OpenAI-compatible endpoint",
                       "kind": "api_key", "active": active == "custom", "base_url": "",
-                      "api_key_env": "", "env_set": False, "default_model": "", "backend": "chat",
+                      "api_key_env": "", "env_set": False, "saved": False, "saved_hint": "",
+                      "default_model": "", "backend": "chat",
                       "description": "Any reachable OpenAI-compatible endpoint"})
     llm = state.jarvis.config["llm"]
     # Booleans only: the key itself never leaves the server.
     return {"providers": providers, "active": active,
             "session_key": bool(llm.get("api_key")),
             "active_key_env": llm.get("api_key_env") or "",
-            "active_key_env_set": _env_is_set(llm.get("api_key_env") or "")}
+            "active_key_env_set": _env_is_set(llm.get("api_key_env") or ""),
+            "active_key_saved": _key_info(llm.get("api_key_env") or "")["saved"]}
+
+
+# ---------- saved API keys (values never leave the server) ----------
+
+KEY_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,120}$")
+
+
+class KeyBody(BaseModel):
+    value: str
+
+
+def _key_name(name):
+    if not KEY_NAME_RE.match(name or ""):
+        fail(400, "Invalid key name")
+    return name
+
+
+@router.get("/keys")
+def list_keys(state: WebState = Depends(web)):
+    from .. import keystore
+    return {"keys": [{"name": n, "hint": keystore.hint(n)} for n in keystore.names()]}
+
+
+@router.put("/keys/{name:path}")
+def put_key(name: str, body: KeyBody, state: WebState = Depends(web)):
+    from .. import keystore
+    _key_name(name)
+    if not body.value.strip():
+        fail(400, "Empty key")
+    keystore.set(name, body.value)
+    _refresh_llm(state)
+    return {"name": name, "hint": keystore.hint(name)}
+
+
+@router.delete("/keys/{name:path}")
+def delete_key(name: str, state: WebState = Depends(web)):
+    from .. import keystore
+    _key_name(name)
+    if not keystore.delete(name):
+        fail(404, "No saved key with that name")
+    _refresh_llm(state)
+    return {"deleted": name}
+
+
+def _refresh_llm(state):
+    """Rebuild the live client so a saved/forgotten key applies at once."""
+    state.jarvis.llm.reconfigure(state.jarvis.config)
 
 
 def _redact(text, secret):
@@ -399,8 +458,16 @@ def set_provider(body: ProviderBody, state: WebState = Depends(web)):
     from ..commands import _split_credentials
     secret = _split_credentials(typed)[1]  # only a literal key is secret; env var names are fine to show
     if provider in _presets():
+        env_name = _presets()[provider].get("api_key_env", "")
+        remember = bool(body.remember and secret and env_name)
+        if remember:  # save first: the provider switch below then finds the key
+            from .. import keystore
+            keystore.set(env_name, secret)
         outputs = [_command(state, "/provider", "use", provider)]
-        if typed:
+        if typed and remember:
+            _refresh_llm(state)
+            outputs.append(f"Credentials: saved key for {env_name}.")
+        elif typed:
             outputs.append(_apply_preset_credential(state, typed))
     elif provider == "custom":
         if not body.base_url.strip():

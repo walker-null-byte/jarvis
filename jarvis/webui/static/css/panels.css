@@ -297,3 +297,9 @@ pre.raw-output { margin: 0; padding: var(--s2) var(--s3); background: var(--bg);
 .tool-row .badge, .tool-row strong + .badge { margin-left: 8px; vertical-align: 2px; }
 .empty-state { text-align: center; padding: var(--s5) var(--s3); border: 1px dashed var(--line); border-radius: var(--radius); }
 .panel-tools > .icon-btn { flex: none; }
+
+/* "Remember on this computer" checkbox row and inline text buttons (saved-key UX) */
+.check-row { display: flex; align-items: center; gap: var(--s2); font-size: 13px; color: var(--muted); cursor: pointer; }
+.check-row input { margin: 0; accent-color: var(--accent); }
+.link-btn { background: none; border: 0; padding: 0 var(--s1); font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }
+.link-btn:hover { filter: brightness(1.15); }

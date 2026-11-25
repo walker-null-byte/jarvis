@@ -118,5 +118,5 @@ def test_personality_migration_stock_keeps_builtin(tmp_path):
 def test_tools_section_lists_names_only(tmp_path):
     jarvis = _agent(tmp_path, ScriptedLLM())
     prompt = jarvis._build_prompt()
-    assert "# Tools" in prompt and "find_tools" in prompt and "cron_add" in prompt
+    assert "# Tools" in prompt and "find_tools" in prompt and "routine_create" in prompt and "cron_add" not in prompt
     assert "input_schema" not in prompt

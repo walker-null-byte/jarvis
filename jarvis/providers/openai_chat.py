@@ -9,8 +9,11 @@ from .thinking import ThinkSplitter, split_all
 
 
 def resolve_key(llm):
-    """Literal keys (session-local, never persisted) win over env vars."""
-    return llm.get("api_key") or os.environ.get(llm.get("api_key_env") or "") or "not-needed"
+    """Literal key, then a key saved in the keystore, then the env var, then "not-needed"."""
+    from .. import keystore
+    name = llm.get("api_key_env") or ""
+    return (llm.get("api_key") or (keystore.get(name) if name else None)
+            or os.environ.get(name) or "not-needed")
 
 
 def _bare_id(model_id):
@@ -63,18 +66,25 @@ def _usage_of(usage):
     return {"input": inp if isinstance(inp, int) else None, "output": out}
 
 
-def clean_messages(messages, gemini=False):
+def clean_messages(messages, gemini=False, echo_reasoning=False):
     """Messages as the Chat Completions API wants them.
 
     Jarvis keeps extra keys on history messages (reasoning, stats, provider
     state); strict servers reject unknown fields, so only the standard ones go
     out. Gemini's thought-signature ``extra_content`` on tool calls is kept
     (and filled with the documented dummy when missing); other servers never see it.
+
+    echo_reasoning (DeepSeek thinking mode): an assistant message that made tool calls in
+    the *current* turn (after the last user message) is sent back with its reasoning as
+    ``reasoning_content``, which the API requires; earlier turns never carry it.
     """
     out = []
-    for msg in messages:
+    turn_start = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1)
+    for index, msg in enumerate(messages):
         clean = {k: msg[k] for k in _MESSAGE_KEYS if k in msg and msg[k] is not None}
         calls = msg.get("tool_calls")
+        if echo_reasoning and calls and index > turn_start and msg.get("reasoning"):
+            clean["reasoning_content"] = msg["reasoning"]
         if calls:
             cleaned = []
             for call in calls:
@@ -103,6 +113,7 @@ class ChatBackend:
         self.stream = llm["stream"]
         self.max_tokens = llm["max_tokens"]
         self.gemini = is_gemini(self.base_url)
+        self.deepseek = llm.get("provider") == "deepseek"
         self.dropped = set()  # optional request fields this server rejected
         self.client = OpenAI(
             base_url=llm["base_url"],
@@ -127,7 +138,7 @@ class ChatBackend:
         )
 
     def _request(self, messages, tools):
-        kwargs = {"model": self.model, "messages": clean_messages(messages, self.gemini),
+        kwargs = {"model": self.model, "messages": clean_messages(messages, self.gemini, self.deepseek),
                   "max_tokens": self.max_tokens}
         if tools:
             kwargs["tools"] = tools

@@ -5,6 +5,7 @@ Every step is logged to mind/episodes/ as it happens.
 
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from .approvals import ApprovalManager
 from .audit import AuditLog
@@ -12,15 +13,17 @@ from .characters import CharacterStore
 from .config import load_config
 from .context import build_system_prompt, ensure_mind
 from .events import Event, EventBus, new_id
+from .file_tools import SPILL_THRESHOLD, prune_spills, spill_output
 from .llm import LLM, Cancelled
 from .memory import EpisodeLog
 from .redaction import redact_text, redact_value
 from .registry import get_registry
-from .sessions import SessionStore
+from . import toolctx
+from .sessions import MemorySessions, SessionStore
 from .tool_exposure import ToolExposure, enable_semantic_search
 from .voice import get_voice
 
-MAX_TOOL_RESULT_CHARS = 8000
+NO_SPILL_TOOLS = {"read_file"}  # already paged by offset/limit; spilling it would be circular
 SUMMARY_PREFIX = "[Summary of the earlier conversation]"
 
 SUMMARIZE_PROMPT = """\
@@ -34,9 +37,19 @@ Transcript:
 """
 
 
+def _card_text(text, limit=2000):
+    """What the chat card shows: the start and the end (where a spill note lives)."""
+    return text if len(text) <= limit else text[:limit - 600] + "\n[...]\n" + text[-500:]
+
+
 class Jarvis:
-    def __init__(self, config=None, session_id=None, event_bus=None):
+    def __init__(self, config=None, session_id=None, event_bus=None, profile=None):
         self.config = config or load_config()
+        self.profile = profile
+        if profile is not None:
+            # Own config copy so this agent's LLM/limits never leak into others.
+            from .runtime import apply_profile_config
+            self.config = apply_profile_config(self.config, profile)
         self.mind = ensure_mind(self.config)
         self.episodes = EpisodeLog(self.mind)
         self.audit = AuditLog(self.mind)
@@ -48,7 +61,8 @@ class Jarvis:
         self.registry.set_approval_handler(self.approvals)
         self.registry.set_cancel_event(self._cancel_event)
         self.approvals.set_cancel_event(self._cancel_event)
-        self.sessions = SessionStore(self.mind)
+        persist = profile is None or profile.persist
+        self.sessions = SessionStore(self.mind) if persist else MemorySessions()
         self.store_characters = CharacterStore(self.mind)
         self.character = self.config["agent"]["character"]
         if session_id:
@@ -56,14 +70,37 @@ class Jarvis:
             self.history = self.sessions.load(session_id)
             self.character = self._stored_character(session_id)
         else:
-            self.session_id = self.sessions.create(character=self.character)
+            self.session_id = self._create_session()
             self.history = []
         enable_semantic_search(self.registry, self.config)
-        self.exposure = ToolExposure(self.registry, self.config, self.mind)
+        self.exposure = ToolExposure(self.registry, self.config, self.mind, profile)
         self.voice = get_voice(self.config)
         self._active_turn = ""
-        self._emit("session_started", session_id=self.session_id)
+        self._spill_count = 0
+        self._spill_lock = threading.Lock()
+        self._start_harness_services()
+        self._emit("session_started", session_id=self.session_id, session_kind=self.kind)
         self.audit.log("session", self.session_id, action="session_started", status="ok")
+
+    def _start_harness_services(self):
+        """Housekeeping that must never block or break startup: old spill files, MCP servers."""
+        try:
+            prune_spills(self.mind)
+            from . import mcp_client
+            mcp_client.attach(self.registry, self.mind, self.events)
+        except Exception as e:
+            self._emit("error", message=f"Harness startup problem: {e}")
+
+    def _create_session(self):
+        p = self.profile
+        if p is None:
+            return self.sessions.create(character=self.character)
+        return self.sessions.create(p.title or "New conversation", self.character, p.kind, p.owner)
+
+    @property
+    def kind(self):
+        """Session kind: "chat" for the main chat, else the profile's kind."""
+        return self.profile.kind if self.profile else "chat"
 
     @property
     def busy(self):
@@ -91,6 +128,8 @@ class Jarvis:
             character=self.store_characters.get(self.character),
             tools_section=self.exposure.prompt_section(),
             memory_chars=self.config["agent"]["memory_index_chars"],
+            role_prompt=self.profile.system_prompt if self.profile else "",
+            replace_persona=bool(self.profile and self.profile.replace_persona),
         )
 
     def ask(self, user_text, on_text=None, on_tool=None, on_tool_result=None, on_reasoning=None):
@@ -151,7 +190,9 @@ class Jarvis:
                 on_text(token)
 
         try:
-            for _ in range(self.config["agent"]["max_tool_rounds"]):
+            rounds = (self.profile.max_tool_rounds if self.profile and self.profile.max_tool_rounds
+                      else self.config["agent"]["max_tool_rounds"])
+            for _ in range(rounds):
                 if self._cancel_event.is_set():
                     return self._finish_cancelled(turn_id)
                 messages = [{"role": "system", "content": system_prompt}]
@@ -176,12 +217,8 @@ class Jarvis:
                     self._active_turn = ""
                     return reply
 
-                for call in calls:
-                    tool_message = self._run_tool(call, on_tool, on_tool_result, turn_id)
-                    self.history.append(tool_message)
-                    self.sessions.append(self.session_id, tool_message)
-                    if self._cancel_event.is_set():
-                        return self._finish_cancelled(turn_id)
+                if not self._run_calls(calls, on_tool, on_tool_result, turn_id):
+                    return self._finish_cancelled(turn_id)
 
             # Tool budget exhausted: ask for a wrap-up without tools.
             messages = [{"role": "system", "content": system_prompt}]
@@ -333,16 +370,71 @@ class Jarvis:
 
     # ---------- tool execution ----------
 
+    def _is_read_only_call(self, call):
+        """True when this call only reads (so it may run concurrently with its neighbours)."""
+        try:
+            args = json.loads(call["function"]["arguments"] or "{}")
+            name, _, _ = self.exposure.unwrap(call["function"]["name"], args)
+        except (ValueError, TypeError):
+            return False
+        return self.exposure.is_read_only(name)
+
+    def _run_calls(self, calls, on_tool, on_tool_result, turn_id):
+        """Run one reply's tool calls and append the results to history in call order.
+
+        Runs of consecutive read-only calls go in parallel (agent.parallel_tools, at most
+        agent.max_parallel_tools at once); everything else runs one at a time, in order,
+        because approvals are serial. Returns False if the turn was cancelled meanwhile.
+        """
+        cfg = self.config["agent"]
+        parallel = bool(cfg.get("parallel_tools", True))
+        workers = max(1, int(cfg.get("max_parallel_tools", 6)))
+        i = 0
+        while i < len(calls):
+            end = i + 1
+            if parallel and self._is_read_only_call(calls[i]):
+                while end < len(calls) and self._is_read_only_call(calls[end]):
+                    end += 1
+            group = calls[i:end]
+            if len(group) > 1:
+                with ThreadPoolExecutor(max_workers=min(workers, len(group))) as pool:
+                    futures = [toolctx.submit_in_context(pool, self._run_tool, c, on_tool, on_tool_result, turn_id)
+                               for c in group]
+                    messages = [f.result() for f in futures]
+            else:
+                messages = [self._run_tool(group[0], on_tool, on_tool_result, turn_id)]
+            for message in messages:
+                self.history.append(message)
+                self.sessions.append(self.session_id, message)
+            i = end
+            if self._cancel_event.is_set():
+                for call in calls[i:]:  # every tool_call needs an answer to keep the history valid
+                    message = {"role": "tool", "tool_call_id": call["id"], "content": "Cancelled."}
+                    self.history.append(message)
+                    self.sessions.append(self.session_id, message)
+                return False
+        return True
+
+    def _spill(self, name, text, turn_id):
+        """Long results go to mind/tool_outputs (head + tail + path stay in context)."""
+        if name in NO_SPILL_TOOLS or len(text) <= SPILL_THRESHOLD:
+            return text
+        with self._spill_lock:
+            self._spill_count += 1
+            number = self._spill_count
+        return spill_output(self.mind, turn_id, number, text)
+
     def _run_tool(self, call, on_tool, on_tool_result=None, turn_id=""):
         """Execute one tool call; returns the tool-result message for history."""
         name = call["function"]["name"]
+        call_id = call.get("id", "")
         try:
             args = json.loads(call["function"]["arguments"] or "{}")
             # Report the inner tool when the model went through call_tool.
             name, args, via = self.exposure.unwrap(name, args)
         except json.JSONDecodeError as e:
             error_msg = f"Tool arguments were not valid JSON: {e}"
-            self._emit("tool_finished", turn_id=turn_id, name=name, args={}, result=error_msg)
+            self._emit("tool_finished", turn_id=turn_id, name=name, args={}, result=error_msg, call_id=call_id)
             self.audit.log("tool", self.session_id, turn_id, name, "error", {"error": error_msg})
             self.episodes.log(f"tool: {name}", f"args: <invalid JSON> {call['function']['arguments'][:500]}\nresult: {error_msg}")
             return {"role": "tool", "tool_call_id": call["id"], "content": error_msg}
@@ -350,22 +442,24 @@ class Jarvis:
         if on_tool:
             on_tool(name, safe_args)
         extra = {"via": via} if via else {}
+        extra["call_id"] = call_id
         self._emit("tool_started", turn_id=turn_id, name=name, args=safe_args, **extra)
 
         try:
-            result = self.exposure.run(name, args, via)
+            ctx = toolctx.ToolContext(self.approvals, self._cancel_event, self, self.session_id, turn_id, call_id)
+            with toolctx.tool_context(ctx):
+                result = self.exposure.run(name, args, via)
         except Exception as e:
             result = f"Error: {e}"
 
         result_str = result if isinstance(result, str) else json.dumps(result, default=str)
         result_str = redact_text(result_str)
-        if len(result_str) > MAX_TOOL_RESULT_CHARS:
-            result_str = result_str[:MAX_TOOL_RESULT_CHARS] + "\n[... truncated]"
+        result_str = self._spill(name, result_str, turn_id)
 
         if on_tool_result:
             on_tool_result(name, redact_value(result))
         self._emit("tool_finished", turn_id=turn_id, name=name, args=safe_args,
-                   result=result_str[:2000], **extra)
+                   result=_card_text(result_str), **extra)
         tool_status = "error" if (isinstance(result, dict) and result.get("error")) else "ok"
         self.audit.log(
             "tool", self.session_id, turn_id, name, tool_status,
@@ -426,9 +520,9 @@ class Jarvis:
         self.character = self.config["agent"]["character"]
         if not self.store_characters.get(self.character):
             self.character = "jarvis"
-        self.session_id = self.sessions.create(character=self.character)
+        self.session_id = self._create_session()
         self.history = []
-        self._emit("session_started", session_id=self.session_id)
+        self._emit("session_started", session_id=self.session_id, session_kind=self.kind)
         return self.session_id
 
     def resume_session(self, session_id):
@@ -438,7 +532,7 @@ class Jarvis:
         self.session_id = session_id
         self.history = self.sessions.load(session_id)
         self.character = self._stored_character(session_id)
-        self._emit("session_started", session_id=session_id)
+        self._emit("session_started", session_id=session_id, session_kind=self.kind)
         return {"session_id": session_id, "messages": len(self.history)}
 
     def last_user_message(self):
