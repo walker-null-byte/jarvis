@@ -159,6 +159,15 @@ chat. It can still use every Jarvis tool.
   code only loads after you review and trust it. **Export** it (optionally
   with its records; never with secrets), **duplicate** a built-in to change it,
   or create a prompt-only agent with *New agent*.
+- **Make with AI**: describe the agent in plain words (the buttons it needs,
+  what to keep track of, which APIs and keys) and the Agent Builder makes it
+  in a chat while a live preview fills in. **Edit with AI** changes an
+  installed agent the same way ("add a field for genre") and shows what
+  changed before you apply it; records and settings are kept. Every draft is
+  strictly checked (manifest, missing libraries, network use, hard-coded
+  keys) and can't be installed while anything is wrong; generated Python
+  tools can be test-run in a separate process after you approve. Works best
+  with a strong model.
 - Format reference: [docs/agent-plugins.md](docs/agent-plugins.md).
 
 ### Routines — recurring and timed tasks
@@ -338,6 +347,22 @@ ruff check .
 ---
 
 ## Changelog
+
+### 1.3.0 — 2026-11-26
+
+**New**
+- **Agent Builder**: *Make with AI* in the New agent dialog and *Edit with AI*
+  on every agent. A builder chat edits a draft through safe tools (the model
+  never writes TOML), a live preview shows actions, tables, settings, exports,
+  tools and permissions, strict checks block broken drafts, and installing
+  goes through the normal review (with a what-changed diff for edits).
+- Approval-gated test runs of an agent's generated Python tools in a subprocess.
+- New agent dialog: *Make with AI*, *Quick* (prompt only) or *Copy an agent*.
+- Drafts in progress are listed on the Agents page.
+
+**Fixed**
+- An agent chat opened mid-turn could stay stuck on "working".
+- Pending approvals now come back when a chat is reloaded.
 
 ### 1.2.0 — 2026-11-26
 

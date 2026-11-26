@@ -74,6 +74,11 @@ class WebState:
         return self._agents
 
     @property
+    def builder(self):
+        """AgentBuilder (jarvis/specialists/builder.py): drafts made with AI."""
+        return self.agents.builder
+
+    @property
     def discussions(self):
         """DiscussionManager (jarvis/discussions.py)."""
         if self._discussions is None:
@@ -106,7 +111,8 @@ class WebState:
             self._saw_error = True
         elif event.kind == "approval_requested":
             self.pending_approvals[event.data["request_id"]] = {
-                **event.data, "requested_at": time.time(), "turn_id": event.turn_id}
+                **event.data, "requested_at": time.time(), "turn_id": event.turn_id,
+                "session_id": event.session_id}
         elif event.kind == "approval_finished":
             self.pending_approvals.pop(event.data.get("request_id"), None)
 

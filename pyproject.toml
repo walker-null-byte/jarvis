@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis-harness"
-version = "1.2.0"
+version = "1.3.0"
 description = "A local-first, self-improving AI agent with a web UI: any model provider, memory, tools, MCP, agents, routines and group discussions"
 readme = "README.md"
 requires-python = ">=3.10"

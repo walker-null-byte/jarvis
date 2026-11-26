@@ -1,8 +1,10 @@
 // Agents grid (#/agents): one card per agent, plus the Import and New agent dialogs.
-import { el } from "./dom.js";
+import { confirmBox, el } from "./dom.js";
 import { icon } from "./icons.js";
-import { agentTile, aicon } from "./agent_icons.js";
-import { ago, formField, request, showErrors } from "./agent_forms.js";
+import { agentTile } from "./agent_icons.js";
+import { ago, request } from "./agent_forms.js";
+import { renderReview } from "./agent_review.js";
+import { openNewAgent } from "./agent_new.js";
 import { emptyState, pageHeader } from "./view_parts.js";
 
 export function mountGrid(container, ctx) {
@@ -10,13 +12,42 @@ export function mountGrid(container, ctx) {
   const grid = el("div", { class: "agent-grid", "aria-busy": "true" });
   const brokenBox = el("div", { class: "agent-broken-list" });
   const importBtn = el("button", { type: "button", onclick: () => openImport(ctx, () => load()) }, icon("upload", 16), "Import");
-  const newBtn = el("button", { type: "button", class: "primary", onclick: () => openWizard(ctx) }, icon("plus", 16), "New agent");
+  const newBtn = el("button", { type: "button", class: "primary", onclick: () => openNewAgent(ctx) }, icon("plus", 16), "New agent");
+  const draftsBox = el("section", { class: "agent-drafts", "aria-label": "Drafts", hidden: true });
   container.append(
     pageHeader("Agents", "Specialists with their own instructions, settings, records and tools. Import one or make your own.", importBtn, newBtn),
-    grid, brokenBox);
+    draftsBox, grid, brokenBox);
   ctx.setTitle?.("Agents");
 
+  async function loadDrafts() {
+    try {
+      const { drafts } = await request("/agent-drafts");
+      draftsBox.hidden = !drafts.length;
+      draftsBox.replaceChildren(...(drafts.length ? [el("h3", { class: "aws-h", text: "Drafts" }), el("div", { class: "agent-drafts-list" }, drafts.map(draftRow))] : []));
+    } catch { draftsBox.hidden = true; }
+  }
+
+  function draftRow(d) {
+    const edit = d.mode === "edit";
+    const badge = d.busy ? el("span", { class: "badge", text: "Building…" })
+      : d.ok ? el("span", { class: "badge ok", text: "Ready" })
+      : el("span", { class: "badge warn", text: `${d.problem_count} problem${d.problem_count === 1 ? "" : "s"}` });
+    const discard = async () => {
+      if (!await confirmBox(`Discard "${d.name || "this draft"}"?`, edit ? "Your changes are thrown away. The installed agent stays as it is." : "The agent being built is thrown away.")) return;
+      try { await request(`/agent-drafts/${encodeURIComponent(d.id)}`, { method: "DELETE" }); toast("Draft discarded"); loadDrafts(); }
+      catch (error) { toast(error.message, "error"); }
+    };
+    return el("div", { class: "agent-draft" }, agentTile({ icon: d.icon }, 36),
+      el("div", { class: "agent-draft-title" }, el("strong", { text: d.name || "Untitled agent" }),
+        el("span", { class: "note", text: `${edit ? `editing ${d.target_name || d.target}` : "new"} · ${ago(d.updated)}` })),
+      badge,
+      el("div", { class: "agent-draft-actions" },
+        el("a", { class: "button primary small", href: `#/agents/build/${encodeURIComponent(d.id)}`, "aria-label": `Resume ${d.name || "draft"}`, text: "Resume" }),
+        el("button", { type: "button", class: "small ghost", "aria-label": `Discard ${d.name || "draft"}`, text: "Discard", onclick: discard })));
+  }
+
   async function load() {
+    loadDrafts();
     try {
       const { agents, broken } = await request("/agents");
       grid.removeAttribute("aria-busy");
@@ -131,111 +162,18 @@ export function openImport(ctx, done) {
   }
 
   function review(card) {
-    state.staging = card.staging;
-    const perms = card.permissions;
-    const chip = (ok, label) => el("span", { class: `perm ${ok ? "" : "off"}` }, aicon(ok ? "check" : "x", 12), label);
-    const list = (title, items) => items.length ? el("div", { class: "review-row" }, el("span", { class: "review-key", text: title }), el("span", { text: items.join(", ") })) : null;
-    let mode = card.existing ? (card.existing.builtin ? "copy" : "upgrade") : "new";
-    const modes = card.existing ? el("fieldset", { class: "review-modes" },
-      el("legend", { text: `You already have ${card.existing.name} v${card.existing.version}` }),
-      ...(card.existing.builtin ? [] : [radio("upgrade", `Upgrade to v${card.version} (keeps its records and settings)`)]),
-      radio("copy", "Install as a separate copy")) : null;
-    function radio(value, label) {
-      const input = el("input", { type: "radio", name: "import-mode", value });
-      input.checked = mode === value;
-      input.addEventListener("change", () => { mode = value; });
-      return el("label", { class: "check" }, input, el("span", { text: label }));
-    }
-    const code = card.py_files.length ? el("div", { class: "review-code", role: "note" },
-      el("div", { class: "agent-broken-head" }, aicon("code", 16), el("strong", { text: `Includes Python code (${card.py_files.length} file${card.py_files.length > 1 ? "s" : ""})` })),
-      el("ul", {}, card.py_files.map((f) => el("li", {}, el("code", { text: f })))),
-      el("p", { class: "note", text: "Trusted code runs on your computer with your permissions. Only trust agents from people you trust. You can install without the code and trust it later." })) : null;
-    const install = async (trust) => {
-      buttons.forEach((b) => { b.disabled = true; });
-      try {
-        const detail = await request(`/agents/${encodeURIComponent(card.id)}/install`, { method: "POST", body: { staging: card.staging, mode, trust } });
-        state.staging = null;
+    renderReview(body, card, {
+      toast,
+      setStaging: (token) => { state.staging = token; },
+      close: (token) => close(token),
+      installed: (detail) => {
         close();
         toast(`${detail.name} installed`);
         done?.();
         navigate(`agents/${encodeURIComponent(detail.id)}`);
-      } catch (error) {
-        buttons.forEach((b) => { b.disabled = false; });
-        toast(error.message, "error");
-      }
-    };
-    const buttons = [el("button", { type: "button", text: "Cancel", onclick: () => close(card.staging) })];
-    if (card.py_files.length) {
-      buttons.push(el("button", { type: "button", text: "Install without code", onclick: () => install(false) }));
-      buttons.push(el("button", { type: "button", class: "primary", onclick: () => install(true) }, aicon("shield", 15), "Trust & install"));
-    } else {
-      buttons.push(el("button", { type: "button", class: "primary", text: "Install", onclick: () => install(false) }));
-    }
-    const dataCounts = Object.entries(card.data || {}).map(([t, n]) => `${n} ${t}`);
-    body.replaceChildren(el("div", { class: "review" },
-      el("div", { class: "review-head" }, agentTile({ icon: card.icon }, 48),
-        el("div", {}, el("strong", { class: "review-name", text: card.name }),
-          el("div", { class: "note", text: `v${card.version}${card.author ? ` · by ${card.author}` : ""} · ${card.id}` }))),
-      card.description ? el("p", { class: "review-desc", text: card.description }) : null,
-      el("div", { class: "review-perms", "aria-label": "Permissions" },
-        chip(perms.network, perms.network ? "Uses the internet" : "No internet"),
-        chip(perms.commands, perms.commands ? "Can run commands" : "No commands"),
-        chip(perms.files !== "none", { data: "Reads files; writes only its data", workspace: "Can edit your files", none: "No file access" }[perms.files])),
-      el("div", { class: "review-list" },
-        list("Actions", card.actions), list("Records", card.records), list("Exports", card.exports),
-        list("Settings", card.settings), list("Skills", card.skills), list("Data included", dataCounts)),
-      code, modes,
-      card.warnings.length ? el("details", { class: "review-warn" }, el("summary", { text: `${card.warnings.length} warning${card.warnings.length > 1 ? "s" : ""}` }),
-        el("ul", {}, card.warnings.map((w) => el("li", { text: w })))) : null,
-      card.skipped.length ? el("details", { class: "review-warn" }, el("summary", { text: `${card.skipped.length} file${card.skipped.length > 1 ? "s" : ""} skipped` }),
-        el("ul", {}, card.skipped.map((w) => el("li", { text: w })))) : null,
-      el("div", { class: "modal-actions" }, buttons)));
-    buttons[buttons.length - 1].focus();
+      },
+    });
   }
 
   chooser();
-}
-
-// ---------- new agent wizard ----------
-
-export function openWizard(ctx) {
-  const { toast, navigate } = ctx;
-  const dialog = el("dialog", { class: "modal agent-dialog", "aria-label": "New agent" });
-  const close = () => { dialog.close(); dialog.remove(); };
-  const fields = {
-    name: formField({ key: "name", label: "Name", type: "text", required: true, placeholder: "Recipe Planner" }, "", { onEnter: () => create() }),
-    description: formField({ key: "description", label: "Short description", type: "text", placeholder: "Plans a week of dinners from what's in the fridge" }, "", { onEnter: () => create() }),
-    prompt: formField({ key: "prompt", label: "Role and instructions", type: "textarea", required: true,
-      placeholder: "You are a meal planner. Ask what's in the fridge, then plan five dinners…",
-      help: "What it is for, how it should work, and any rules. You can refine this later in prompt.md." }, "", { onEnter: () => create() }),
-  };
-  fields.prompt.control.rows = 7;
-  const createBtn = el("button", { type: "button", class: "primary", text: "Create agent", onclick: () => create() });
-  dialog.append(el("div", { class: "agent-dialog-head" }, el("h3", { text: "New agent" }),
-      el("button", { type: "button", class: "icon-btn", "aria-label": "Close", onclick: close }, icon("x", 18))),
-    el("p", { class: "note", text: "Start with a role. Settings, records, actions and tools can be added to its agent.toml later." }),
-    el("div", { class: "agent-form" }, Object.values(fields).map((f) => f.node)),
-    el("div", { class: "modal-actions" }, el("button", { type: "button", text: "Cancel", onclick: close }), createBtn));
-  dialog.addEventListener("cancel", close);
-  document.body.append(dialog);
-  dialog.showModal();
-  fields.name.focus();
-
-  async function create() {
-    const values = Object.fromEntries(Object.entries(fields).map(([k, f]) => [k, f.get()]));
-    const errors = {};
-    if (!values.name.trim()) errors.name = "give it a name";
-    if (!values.prompt.trim()) errors.prompt = "describe what it does";
-    if (showErrors(fields, errors)) return;
-    createBtn.disabled = true;
-    try {
-      const detail = await request("/agents", { method: "POST", body: values });
-      close();
-      toast(`${detail.name} created`);
-      navigate(`agents/${encodeURIComponent(detail.id)}`);
-    } catch (error) {
-      createBtn.disabled = false;
-      if (!showErrors(fields, error.data?.fields)) toast(error.message, "error");
-    }
-  }
 }

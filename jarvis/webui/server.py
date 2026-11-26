@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import (routes_agents, routes_core, routes_discussions, routes_panels, routes_routines,
+from . import (routes_agents, routes_builder, routes_core, routes_discussions, routes_panels, routes_routines,
                routes_runtime, routes_tools, routes_voice)
 from .security import COOKIE_NAME, SecurityMiddleware, allowed_hosts_for, is_loopback, token_matches
 from .state import WebState
@@ -43,7 +43,7 @@ def create_app(jarvis, token, host="127.0.0.1", port=7777):
     app.include_router(routes_panels.router)
     app.include_router(routes_voice.router)
     app.include_router(routes_runtime.router)
-    for feature in (routes_agents, routes_discussions, routes_routines, routes_tools):
+    for feature in (routes_agents, routes_builder, routes_discussions, routes_routines, routes_tools):
         app.include_router(feature.router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app

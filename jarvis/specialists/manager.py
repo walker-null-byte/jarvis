@@ -112,6 +112,7 @@ class AgentManager:
         self._cache = {}        # id -> (stamp, Plugin)
         self._broken = {}       # folder name -> {path, issues}
         self._tool_cache = {}   # id -> (code hash, tools, errors)
+        self._builder = None
         from ..runtime import register_profile_factory
         register_profile_factory("agent", lambda owner, meta: self.profile(owner, meta))
         try:  # spawn_agent(agent="<plugin id>") delegates to installed agents
@@ -119,6 +120,14 @@ class AgentManager:
             set_agent_manager(self)
         except ImportError:
             pass
+
+    @property
+    def builder(self):
+        """The AgentBuilder (drafts made with AI); created on first use."""
+        if self._builder is None:
+            from .builder import AgentBuilder
+            AgentBuilder(self)
+        return self._builder
 
     # ---------- discovery ----------
 
@@ -629,8 +638,11 @@ class AgentManager:
             except OSError:
                 pass
 
-    def stage(self, files, skipped=(), source=""):
-        """Put imported files in staging and return the review card (raises ManifestError)."""
+    def stage(self, files, skipped=(), source="", draft_id=""):
+        """Put imported files in staging and return the review card (raises ManifestError).
+
+        draft_id: the builder draft this comes from; installing it deletes the draft.
+        """
         self._clean_staging()
         token = uuid.uuid4().hex[:16]
         folder = self.staging_dir / token
@@ -647,7 +659,8 @@ class AgentManager:
         except ManifestError:
             shutil.rmtree(folder, ignore_errors=True)
             raise
-        atomic_write_json(folder / "meta.json", {"source": source, "skipped": list(skipped), "created": _now()})
+        atomic_write_json(folder / "meta.json", {"source": source, "skipped": list(skipped), "created": _now(),
+                                                 **({"draft_id": draft_id} if draft_id else {})})
         return self.review(token, manifest, warnings, skipped, source)
 
     def review(self, token, manifest, warnings, skipped, source):
@@ -732,6 +745,7 @@ class AgentManager:
                 old = self.staging_dir / f"{token}-old"
                 target.replace(old)
             (folder / "plugin").replace(target)
+            draft_id = self._staged_draft(folder)
             if old:
                 shutil.rmtree(old, ignore_errors=True)
             self._restore_data(agent_id, folder / "data" / "records")
@@ -741,7 +755,17 @@ class AgentManager:
                 self.trust(agent_id, True)
             elif mode == "upgrade":
                 self.refresh_sessions(agent_id)
+        if draft_id:  # built with the AI builder: the draft is finished
+            self.builder.finish(draft_id)
         return self.detail(agent_id)
+
+    @staticmethod
+    def _staged_draft(folder):
+        """The builder draft id recorded in a staging folder's meta.json ('' when it isn't from a draft)."""
+        try:
+            return json.loads((folder / "meta.json").read_text(encoding="utf-8")).get("draft_id") or ""
+        except (OSError, ValueError, AttributeError):
+            return ""
 
     def _restore_data(self, agent_id, records_dir):
         """Records from an 'export with data' zip, only into empty tables."""

@@ -63,6 +63,7 @@ export function mountWorkspace(container, agentId, ctx) {
     }
     const item = (name, label, fn, cls = "") => el("button", { type: "button", role: "menuitem", class: cls, onclick: () => { toggleMenu(false); fn(); } }, aicon(name, 15), label);
     moreMenu.append(
+      item("sparkle", detail.builtin ? "Edit a copy with AI" : "Edit with AI", editWithAI),
       item("copy", "Duplicate to customise", duplicate),
       item("download", "Export agent (.zip)", () => download(`/agents/${encodeURIComponent(agentId)}/export.zip`)),
       item("download", "Export with records", () => download(`/agents/${encodeURIComponent(agentId)}/export.zip?data=1`)),
@@ -77,6 +78,8 @@ export function mountWorkspace(container, agentId, ctx) {
           detail.builtin ? el("span", { class: "badge", text: "Built-in" }) : null),
         el("p", { class: "note", text: detail.description })),
       el("div", { class: "aws-head-actions" },
+        el("button", { type: "button", class: "aws-ai", title: detail.builtin ? "Built-in agents can't be changed in place: this makes your own copy and edits that" : "Change this agent by describing what you want", onclick: () => editWithAI() },
+          aicon("sparkle", 15), el("span", { class: "label", text: "Edit with AI" })),
         el("button", { type: "button", onclick: () => openSettings() }, icon("sliders", 15), el("span", { class: "label", text: "Settings" }),
           detail.missing_settings.length ? el("span", { class: "dot-warn", "aria-label": "needs setup" }) : null),
         el("button", { type: "button", onclick: () => openAbout() }, icon("info", 15), el("span", { class: "label", text: "About" })),
@@ -385,6 +388,17 @@ export function mountWorkspace(container, agentId, ctx) {
       const copy = await request(`/agents/${encodeURIComponent(agentId)}/duplicate`, { method: "POST" });
       toast(`Copied as ${copy.name}. Edit its files in ${copy.location}.`);
       navigate(`agents/${encodeURIComponent(copy.id)}`);
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function editWithAI() {
+    if (detail.builtin) {
+      const ok = await confirmBox(`Edit a copy of ${detail.name}?`, "Built-in agents can't be changed. This makes your own copy and opens it in the builder. The built-in one stays as it is.");
+      if (!ok) return;
+    }
+    try {
+      const draft = await request(`/agents/${encodeURIComponent(agentId)}/edit-draft`, { method: "POST", body: {} });
+      navigate(`agents/build/${encodeURIComponent(draft.id)}`);
     } catch (error) { toast(error.message, "error"); }
   }
 

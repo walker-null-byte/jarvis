@@ -1,11 +1,12 @@
-// Hash router. Routes: #/chat[/<sid>], #/agents[/<id>], #/discussions[/<id>], #/routines, #/tools.
+// Hash router. Routes: #/chat[/<sid>], #/agents[/<id>], #/agents/build/<draft_id>, #/discussions[/<id>], #/routines, #/tools.
 // Anything else is the chat. Back and forward work because every route is a hash.
 
 const VIEWS = ["agents", "discussions", "routines", "tools"];
 
 export function parseHash(hash = window.location.hash) {
   const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
-  const [first, second] = parts;
+  const [first, second, third] = parts;
+  if (first === "agents" && second === "build" && third) return { name: "agents", params: { build: third }, view: true };
   if (VIEWS.includes(first)) return { name: first, params: second ? { id: second } : {}, view: true };
   return { name: "chat", params: { sid: first === "chat" && second ? second : "" }, view: false };
 }

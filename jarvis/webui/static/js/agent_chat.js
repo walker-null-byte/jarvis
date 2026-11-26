@@ -100,9 +100,12 @@ export class AgentChat {
     this.picker.setValue(sid);
     this.onSessionChange?.(sid);
     try {
+      const epoch = this.busyEvents = (this.busyEvents || 0);
       const data = await api(`/runtime/${encodeURIComponent(sid)}/history`);
       if (this.sid !== sid) return;
-      this.chat.load(data.history);
+      // A busy_changed event that arrived while the history was in flight is newer than the history.
+      if (this.busyEvents !== epoch) data.busy = this.busy;
+      this.chat.load(data.history, data.approvals || []);
       decorateActions(this.transcript);
       this.setBusy(!!data.busy);
       this.joinedMidTurn = !!data.busy;
@@ -207,7 +210,7 @@ export class AgentChat {
     const d = msg.data || {};
     if (msg.kind === "session_started") return;
     if (msg.kind === "turn_started") { this.hideEmpty(); this.setBusy(true); }
-    if (msg.kind === "busy_changed") { this.setBusy(!!d.busy); if (!d.busy) this.chat.endTurn(); return; }
+    if (msg.kind === "busy_changed") { this.busyEvents = (this.busyEvents || 0) + 1; this.setBusy(!!d.busy); if (!d.busy) this.chat.endTurn(); return; }
     this.chat.handle(msg);
     if (msg.kind === "user_message") decorateActions(this.transcript);
     if (msg.kind === "turn_finished") {

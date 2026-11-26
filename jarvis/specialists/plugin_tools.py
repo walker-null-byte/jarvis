@@ -106,8 +106,16 @@ def load_plugin_tools(manager, plugin):
     folder = Path(plugin.path) / "tools"
     if not folder.is_dir():
         return {}, []
-    ctx = PluginContext(manager, plugin)
-    package = f"jarvis_plugins.{plugin.id.replace('-', '_')}"
+    return import_tool_files(PluginContext(manager, plugin), folder, plugin.id)
+
+
+def import_tool_files(ctx, folder, plugin_id):
+    """Import every non-helper .py in `folder` as jarvis_plugins.<id>.<file> and call register(ctx).
+
+    Shared with the builder's test runner, which passes a stub ctx. Returns (tools, errors).
+    """
+    folder = Path(folder)
+    package = f"jarvis_plugins.{plugin_id.replace('-', '_')}"
     if "jarvis_plugins" not in sys.modules:
         root = types.ModuleType("jarvis_plugins")
         root.__path__ = []

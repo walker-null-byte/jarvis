@@ -44,7 +44,8 @@ def runtime_history(session_id: str, state: WebState = Depends(web)):
     jarvis = _runtime(state, session_id)
     return {"session": jarvis.sessions.get(session_id) or {"id": session_id},
             "history": render_history(jarvis.history, state.artifacts.get),
-            "busy": state.runtimes.busy(session_id)}
+            "busy": state.runtimes.busy(session_id),
+            "approvals": [a for a in list(state.pending_approvals.values()) if a.get("session_id") == session_id]}
 
 
 @router.post("/{session_id}/retry", status_code=202)
