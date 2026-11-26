@@ -18,6 +18,7 @@ export class BuilderPreview {
     this.code = new Map();         // path -> {text} | {error}, valid for one draft revision
     this.codeFor = "";
     this.problemsOpen = false;
+    this.todoOpen = true;
     this.draft = null;
     this.busy = false;
   }
@@ -32,7 +33,7 @@ export class BuilderPreview {
   render() {
     const d = this.draft;
     const m = d.manifest || {};
-    const check = d.check || { ok: false, problems: [], notes: [], tools: [] };
+    const check = d.check || { ok: false, todo: [], problems: [], notes: [], tools: [] };
     const settings = m.settings || [];
     const records = m.records || [];
     const actions = m.actions || [];
@@ -65,18 +66,26 @@ export class BuilderPreview {
     this.node.replaceChildren(...parts);
   }
 
+  // Two separate blocks: "Agent todo" (not written yet: neutral) and "problems" (wrong: warning).
   status(check) {
-    const n = check.problems?.length || 0;
-    if (check.ok && !n) {
+    const todo = check.todo || [];
+    const problems = check.problems || [];
+    if (check.ok && !todo.length && !problems.length) {
       return el("div", { class: "bp-status ok", role: "status" }, icon("check", 16), el("strong", { text: "Ready to install" }),
         this.busy ? el("span", { class: "note", text: "The builder is still working" }) : null);
     }
-    const details = el("details", { class: "bp-status bad", open: this.problemsOpen });
-    details.addEventListener("toggle", () => { this.problemsOpen = details.open; });
-    details.append(el("summary", {}, icon("alert", 16), el("strong", { text: `${n} problem${n === 1 ? "" : "s"}` }),
-      el("span", { class: "note", text: "Must be fixed before install" })),
-      el("ul", {}, (check.problems || []).map((p) => el("li", { text: p }))));
-    return details;
+    const block = (kind, iconName, title, hint, items, open, remember) => {
+      const details = el("details", { class: `bp-status ${kind}`, open });
+      details.addEventListener("toggle", () => remember(details.open));
+      details.append(el("summary", {}, icon(iconName, 16), el("strong", { text: title }), el("span", { class: "note", text: hint })),
+        el("ul", { class: kind === "todo" ? "bp-tasks" : "" }, items.map((t) => el("li", { text: t }))));
+      return details;
+    };
+    return el("div", { class: "bp-statuses" },
+      todo.length ? block("todo", "info", `Agent todo: ${todo.length}`, "The builder has not done these yet", todo,
+        this.todoOpen, (v) => { this.todoOpen = v; }) : null,
+      problems.length ? block("bad", "alert", `${problems.length} problem${problems.length === 1 ? "" : "s"}`,
+        "Must be fixed before install", problems, this.problemsOpen, (v) => { this.problemsOpen = v; }) : null);
   }
 
   planning() {

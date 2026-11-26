@@ -358,9 +358,18 @@ ruff check .
   goes through the normal review (with a what-changed diff for edits).
 - Approval-gated test runs of an agent's generated Python tools in a subprocess.
 - New agent dialog: *Make with AI*, *Quick* (prompt only) or *Copy an agent*.
-- Drafts in progress are listed on the Agents page.
+- Drafts in progress are listed on the Agents page; unfinished parts show as
+  *Agent todo* items, separate from real problems.
+- **Thinking control** under the message box: Auto / Off / Low / Medium / High
+  reasoning effort and the *Max output* budget, translated for each provider
+  (OpenAI, Gemini, DeepSeek, OpenRouter, ChatGPT, Anthropic, local servers).
 
 **Fixed**
+- Replies cut off by the output limit no longer end the turn silently: Jarvis
+  reads the model's stop reason, retries once with double the limit, and
+  otherwise says so and offers Continue. A cut-off tool call is never run.
+- Default max output raised from 4,096 to 16,384 tokens (thinking models used
+  the whole budget on reasoning); servers with a lower cap are detected.
 - An agent chat opened mid-turn could stay stuck on "working".
 - Pending approvals now come back when a chat is reloaded.
 

@@ -46,6 +46,7 @@ MAX_FILE_BYTES = 200 * 1024
 MAX_FILES = 40
 MIN_PROMPT_CHARS = 80
 MIN_ACTION_PROMPT_CHARS = 20
+PLACEHOLDER_PROMPT = "The builder has not written this agent's prompt yet."
 DIFF_CAP = 4096
 MAX_PROBLEMS_SHOWN = 15
 
@@ -386,13 +387,15 @@ def _as_list(value):
 def check_draft(folder, manifest_data, jarvis_tools=None):
     """Strict check of a draft plugin folder. Never imports or runs the draft's code.
 
-    Returns {ok, problems [str], notes [str], tools [{file, tools, imports, uses}]}. Every manifest
-    warning counts as a problem, plus the extra rules of docs/agent-builder.md. `jarvis_tools` is
+    Returns {ok, todo [str], problems [str], notes [str], tools [{file, tools, imports, uses}]}.
+    `todo` is what the builder has not written yet (description, prompt.md, action prompts);
+    `problems` is what is wrong (every manifest warning, bad imports, permission mismatches...,
+    plus the extra rules of docs/agent-builder.md). Both block installing. `jarvis_tools` is
     the list of valid Jarvis tool names (None skips the core_tools / name-clash checks).
     """
     folder = Path(folder)
     data = manifest_data if isinstance(manifest_data, dict) else {}
-    problems, notes, tools = [], [], []
+    problems, todo, notes, tools = [], [], [], []
     try:
         _, warnings = validate(copy.deepcopy(data), folder)
         problems += [format_issue(w) for w in warnings]
@@ -422,13 +425,16 @@ def check_draft(folder, manifest_data, jarvis_tools=None):
     elif isinstance(icon, str) and icon not in KNOWN_ICONS:
         problems.append(f"icon: '{icon}' is not a known icon. Use one of: {', '.join(sorted(KNOWN_ICONS))} (or write icon.svg).")
 
+    if not str(data.get("description") or "").strip():
+        todo.append("Write the description: one or two sentences on what the agent does (draft_set description).")
+
     prompt_name = agent.get("prompt") if isinstance(agent.get("prompt"), str) else "prompt.md"
     prompt_path = _inside(folder, prompt_name)
     if prompt_path is not None and prompt_path.is_file():
-        size = len(prompt_path.read_text(encoding="utf-8", errors="replace").strip())
-        if size < MIN_PROMPT_CHARS:
-            problems.append(f"{prompt_name}: is only {size} characters. Write the agent's role, workflow and rules "
-                            f"(at least {MIN_PROMPT_CHARS} characters) with draft_write_file.")
+        text = prompt_path.read_text(encoding="utf-8", errors="replace").strip()
+        if text.startswith(PLACEHOLDER_PROMPT) or len(text) < MIN_PROMPT_CHARS:
+            todo.append(f"Write {prompt_name}: the agent's role, workflow and rules "
+                        f"(at least {MIN_PROMPT_CHARS} characters) with draft_write_file.")
 
     for setting in _as_list(data.get("settings")):
         key = str(setting.get("key", ""))
@@ -438,8 +444,8 @@ def check_draft(folder, manifest_data, jarvis_tools=None):
     for action in _as_list(data.get("actions")):
         text = action.get("prompt")
         if isinstance(text, str) and len(text.strip()) < MIN_ACTION_PROMPT_CHARS:
-            problems.append(f"actions → {action.get('id', '?')}: the prompt is too short ({len(text.strip())} characters). "
-                            "Say what the agent should do, step by step.")
+            todo.append(f"Write the prompt of action '{action.get('id', '?')}': say what the agent should do, step by "
+                        f"step (at least {MIN_ACTION_PROMPT_CHARS} characters).")
 
     helpers = {p.stem for p in (folder / "tools").glob("_*.py")} if (folder / "tools").is_dir() else set()
     seen_names = {}
@@ -452,12 +458,12 @@ def check_draft(folder, manifest_data, jarvis_tools=None):
             notes.append(f"tools/{path.name}: tools {', '.join(info['tools']) or 'none'}{extra}")
     if tools:
         notes.append("This agent has Python code: the user must review it and choose Trust when installing.")
-    todo = [s for s in _as_list(data.get("settings")) if s.get("required")]
-    if todo:
+    required = [s for s in _as_list(data.get("settings")) if s.get("required")]
+    if required:
         notes.append("After installing, the user must fill in: "
-                     + ", ".join(str(s.get("label") or s.get("key")) for s in todo))
-    unique = list(dict.fromkeys(problems))
-    return {"ok": not unique, "problems": unique, "notes": notes, "tools": tools}
+                     + ", ".join(str(s.get("label") or s.get("key")) for s in required))
+    unique, tasks = list(dict.fromkeys(problems)), list(dict.fromkeys(todo))
+    return {"ok": not unique and not tasks, "todo": tasks, "problems": unique, "notes": notes, "tools": tools}
 
 
 # ---------- what changed ----------
@@ -607,7 +613,8 @@ templates, tools, permissions, examples, checklist). Read the topic before you w
 `draft_upsert(section, item)` (settings, records, actions, exports), `draft_upsert_field`,
 `draft_remove`, `draft_remove_field`, `draft_write_file` (prompt.md, README.md, skills/x.md,
 exports/x.md, tools/x.py, icon.svg), `draft_edit_file`, `draft_delete_file`. `draft_check` lists what
-is still wrong; every change tool also returns the current problems, so fix them as you go.
+is still to do (`todo`) and still wrong (`problems`); every change tool also returns both, so work
+through them as you go.
 `draft_test_tool` runs one Python tool (the user is asked first).
 
 ## Workflow
@@ -616,7 +623,7 @@ is still wrong; every change tool also returns the current problems, so fix them
 2. Build with the draft tools. Write a real `prompt.md`: role, step-by-step workflow, rules, what never to
    do. Action prompts are instructions to the agent: concrete steps, which records to save, what to
    report. Use `{input_key}`, `{settings.KEY}` and `{records.<table>.count}` placeholders.
-3. Call `draft_check` and repair until it is ready. Never tell the user it is ready while problems remain.
+3. Call `draft_check` and repair until it is ready. Never tell the user it is ready while todo or problems remain.
 4. If there are Python tools, offer to test them with `draft_test_tool`.
 5. Finish with a short summary: what each button does, which settings to fill in, the permissions and
    why, and "Press **Review & install**" (editing an installed agent: "**Review & apply**").
@@ -798,7 +805,7 @@ class AgentBuilder:
                 manifest = self._skeleton(self._pick_id(shown), shown)
                 draft_id = self._new_draft("new", manifest, request, llm=llm, id_auto=not name)
                 (self.plugin_dir(draft_id) / "prompt.md").write_text(
-                    "The builder has not written this agent's prompt yet.\n", encoding="utf-8")
+                    PLACEHOLDER_PROMPT + "\n", encoding="utf-8")
             self._ensure_session(draft_id)
         self.chat(draft_id, request)
         return self.get(draft_id)
@@ -854,7 +861,8 @@ class AgentBuilder:
             items.append({"id": meta["id"], "mode": meta["mode"], "target": meta.get("target"),
                           "target_name": self._target_name(meta), "name": manifest.get("name", ""),
                           "icon": manifest.get("icon", "agents"), "updated": meta.get("updated", ""),
-                          "ok": check["ok"], "problem_count": len(check["problems"]), "busy": self._busy(meta)})
+                          "ok": check["ok"], "problem_count": len(check["problems"]),
+                          "todo_count": len(check["todo"]), "busy": self._busy(meta)})
         return items
 
     def get(self, draft_id):
@@ -995,10 +1003,14 @@ class AgentBuilder:
         lines.append("Files: " + (", ".join(f"{f['path']} ({f['size']} B)" for f in self._files(draft_id)
                                              if f["path"] != "agent.toml") or "none"))
         if check["ok"]:
-            lines.append("Check: READY, no problems.")
+            lines.append("Check: READY, nothing left to do and no problems.")
         else:
-            lines.append(f"Check: {len(check['problems'])} problem(s):")
-            lines += [f"- {p}" for p in check["problems"][:MAX_PROBLEMS_SHOWN]]
+            if check["todo"]:
+                lines.append(f"Agent todo ({len(check['todo'])}):")
+                lines += [f"- {t}" for t in check["todo"][:MAX_PROBLEMS_SHOWN]]
+            if check["problems"]:
+                lines.append(f"Check: {len(check['problems'])} problem(s):")
+                lines += [f"- {p}" for p in check["problems"][:MAX_PROBLEMS_SHOWN]]
         return "\n".join(lines)
 
     @staticmethod
@@ -1027,8 +1039,9 @@ class AgentBuilder:
                 raise AgentError("The builder is still working. Wait for it to finish first.", 409)
             check = self.check(draft_id)
             if not check["ok"]:
-                raise AgentError("The draft still has problems:\n" + "\n".join(f"- {p}" for p in check["problems"]),
-                                 409, issues=check["problems"])
+                open_items = [*check["todo"], *check["problems"]]
+                raise AgentError("The draft is not finished:\n" + "\n".join(f"- {p}" for p in open_items),
+                                 409, issues=open_items)
             manifest = self.manifest(draft_id)
             baseline_id = meta.get("target") or meta.get("base")
             baseline = self.manager.plugins().get(baseline_id) if baseline_id else None
@@ -1052,9 +1065,12 @@ class AgentBuilder:
     def _result(self, draft_id, summary, error=None):
         check = self.check(draft_id)
         result = {"ok": check["ok"] and error is None, "summary": error or summary,
+                  "todo": check["todo"][:MAX_PROBLEMS_SHOWN],
                   "problems": check["problems"][:MAX_PROBLEMS_SHOWN]}
         if len(check["problems"]) > MAX_PROBLEMS_SHOWN:
             result["more_problems"] = len(check["problems"]) - MAX_PROBLEMS_SHOWN
+        if len(check["todo"]) > MAX_PROBLEMS_SHOWN:
+            result["more_todo"] = len(check["todo"]) - MAX_PROBLEMS_SHOWN
         if error:
             result["error"] = error
         return result
@@ -1078,7 +1094,7 @@ class AgentBuilder:
                     except BuilderError as error:
                         return builder._result(draft_id, "", error=str(error))
                     except AgentError as error:
-                        return {"ok": False, "error": str(error), "summary": str(error), "problems": []}
+                        return {"ok": False, "error": str(error), "summary": str(error), "todo": [], "problems": []}
                     builder._emit_changed(draft_id)
                     return builder._result(draft_id, summary)
             return run
@@ -1215,7 +1231,7 @@ class AgentBuilder:
 
         @reading
         def draft_check():
-            """Run the full strict check: problems that block installing, notes, and the Python tools found."""
+            """Run the full strict check: what is still to do, what is wrong (both block installing), notes, and the Python tools found."""
             return builder.check(draft_id)
 
         @reading

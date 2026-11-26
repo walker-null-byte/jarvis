@@ -184,8 +184,17 @@ class LLM:
                 )
         return True, f"Connected — {len(ids)} model(s) listed", ids, 200
 
-    def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
+    def output_limit(self, override=None):
+        """The output-token limit a request will use (None when the backend sets none)."""
+        fn = getattr(self._impl, "effective_max_tokens", None)
+        return fn(override) if fn else (override or self.max_tokens)
+
+    def chat(self, messages, tools=None, on_text=None, on_reasoning=None, max_tokens=None):
         """Send one request; returns an assistant message dict (see CONTRACT).
+
+        The message carries ``stop`` (why the model stopped: "end", "tool_calls", "length",
+        "content_filter", "refusal", or the provider's own word) when the backend reported it.
+        *max_tokens* overrides the configured output limit for this one request.
 
         on_text(token) / on_reasoning(token) receive streamed fragments.
         Retries connection errors, timeouts, 429 and 5xx with exponential
@@ -196,7 +205,8 @@ class LLM:
             on_text_t, on_reasoning_t = timing.wrap(on_text, on_reasoning)
             try:
                 self.last_error = None
-                msg = self._impl.chat(messages, tools, on_text_t, on_reasoning_t)
+                extra = {"max_tokens": max_tokens} if max_tokens else {}
+                msg = self._impl.chat(messages, tools, on_text_t, on_reasoning_t, **extra)
             except Cancelled:
                 raise
             except Exception as error:

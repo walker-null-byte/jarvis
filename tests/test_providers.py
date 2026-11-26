@@ -243,7 +243,7 @@ def test_anthropic_final_message():
         Block(type="tool_use", id="t1", name="a", input={"k": 1}),
     ])
     msg = an.final_to_message(final, "claude-opus-5-5")
-    assert msg["content"].startswith("Hi") and msg["content"].endswith("[response truncated]")
+    assert msg["content"] == "Hi" and msg["stop"] == "length"
     assert msg["reasoning"] == "mull"
     assert json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"k": 1}
     assert msg["provider_state"]["backend"] == "anthropic"
@@ -260,7 +260,7 @@ def test_anthropic_refusal():
 def test_anthropic_request_shape():
     backend = an.AnthropicBackend(make_config("anthropic", model="claude-opus-5-5", effort="high", max_tokens=100)["llm"])
     req = backend.build_request([{"role": "system", "content": "s"}, {"role": "user", "content": "q"}])
-    assert req["max_tokens"] == 32000 and req["fallbacks"] == "default"
+    assert req["max_tokens"] == 16384 and req["fallbacks"] == "default"
     assert set(req["betas"]) == {an.THINKING_BETA, an.FALLBACK_BETA}
     assert req["output_config"] == {"effort": "high"}
     assert req["system"] == [{"type": "text", "text": "s"}]

@@ -45,12 +45,12 @@ DEFAULTS = {
         "model": "openai/gpt-oss-20b",
         "api_key_env": "JARVIS_API_KEY",
         "stream": True,
-        "max_tokens": 4096,
+        "max_tokens": 16384,  # output budget; reasoning tokens count against it
         "timeout": 120,
         "retries": 2,
         "retry_delay": 1.0,
-        # Optional reasoning effort for backends that support it
-        # (anthropic: low|medium|high|xhigh|max). Empty = backend default.
+        # Reasoning effort ("Thinking" in the composer): "" = Auto (the model's default),
+        # "off", "low", "medium", "high" (anthropic also xhigh|max). Mapped per provider.
         "effort": "",
     },
     "agent": {
@@ -120,6 +120,8 @@ def load_config():
         config["agent"]["core_tools"] = list(NEW_CORE_TOOLS)  # also covers saved runtime overrides
     if config["agent"].get("max_tool_rounds") == 20:  # the 1.1 default, saved by older settings
         config["agent"]["max_tool_rounds"] = DEFAULTS["agent"]["max_tool_rounds"]
+    if config["llm"].get("max_tokens") == 4096:  # the old default, saved by older settings
+        config["llm"]["max_tokens"] = DEFAULTS["llm"]["max_tokens"]
     _apply_environment(config)
     _validate_config(config)
     return config

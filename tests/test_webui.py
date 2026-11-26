@@ -819,3 +819,18 @@ def test_provider_fields_are_listed_saved_and_validated(env, monkeypatch):
     # The slash command takes the same settings.
     commands.handle_slash_command(env.jarvis, "/provider use cloudflare-gateway gateway_id=my-gw")
     assert provider_fields.values("cloudflare-gateway") == {"account_id": "acc123", "gateway_id": "my-gw"}
+
+
+def test_llm_options_route_applies_and_persists_only_those_keys(env):
+    response = env.client.post("/api/llm/options", json={"effort": "High", "max_tokens": 32768})
+    assert response.status_code == 200
+    assert response.json()["effort"] == "high" and response.json()["status"]["max_tokens"] == 32768
+    assert env.jarvis.llm.max_tokens == 32768 and env.jarvis.config["llm"]["effort"] == "high"
+    from jarvis.config import runtime_config_path
+    import json
+    saved = json.loads(runtime_config_path(env.jarvis.config).read_text())
+    assert saved == {"llm": {"effort": "high", "max_tokens": 32768}}
+    assert env.client.post("/api/llm/options", json={"effort": ""}).json()["effort"] == ""
+    assert env.client.post("/api/llm/options", json={"effort": "extreme"}).status_code == 400
+    assert env.client.post("/api/llm/options", json={"max_tokens": 5}).status_code == 400
+    assert env.client.get("/api/settings").json()["settings"]["llm.effort"] == ""

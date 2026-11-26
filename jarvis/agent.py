@@ -24,6 +24,7 @@ from .tool_exposure import ToolExposure, enable_semantic_search
 from .voice import get_voice
 
 NO_SPILL_TOOLS = {"read_file"}  # already paged by offset/limit; spilling it would be circular
+MAX_RETRY_TOKENS = 65536  # ceiling for the one automatic retry after a cut-off reply
 SUMMARY_PREFIX = "[Summary of the earlier conversation]"
 
 SUMMARIZE_PROMPT = """\
@@ -40,6 +41,14 @@ Transcript:
 def _card_text(text, limit=2000):
     """What the chat card shows: the start and the end (where a spill note lives)."""
     return text if len(text) <= limit else text[:limit - 600] + "\n[...]\n" + text[-500:]
+
+
+def truncation_notice(limit):
+    """What the user reads when the model ran out of output tokens twice."""
+    if not limit:
+        return "The model ran out of output tokens before finishing. Press Continue."
+    return (f"The model ran out of output tokens (limit {limit:,}) before finishing. "
+            "Raise *Max output* in the composer's model options, then press Continue.")
 
 
 class Jarvis:
@@ -202,9 +211,14 @@ class Jarvis:
                 try:
                     msg = self._chat_turn(messages, turn_id, tools=tools, on_text=emit_text,
                                           on_reasoning=emit_reasoning)
+                    if msg.get("stop") == "length":
+                        msg = self._recover_truncated(msg, messages, turn_id, tools, emit_text,
+                                                      emit_reasoning, partial)
                 except Cancelled:
                     return self._finish_cancelled(turn_id, "".join(partial["text"]),
                                                   "".join(partial["reasoning"]))
+                if msg.get("stop") == "length":
+                    return self._finish_truncated(msg, turn_id)
                 self._record_assistant(msg, turn_id)
 
                 calls = msg.get("tool_calls")
@@ -251,6 +265,43 @@ class Jarvis:
         except Exception:
             self._active_turn = ""
             raise
+
+    def _recover_truncated(self, msg, messages, turn_id, tools, emit_text, emit_reasoning, partial):
+        """The model hit its output limit (reasoning tokens count too): retry once, bigger.
+
+        The cut-off reply is discarded (its last tool call would be half-written JSON). The
+        UI is told so it can clear the streaming bubble. Returns the retry's reply, or *msg*
+        unchanged when no larger limit is possible.
+        """
+        limit_of = getattr(self.llm, "output_limit", None)
+        limit = limit_of() if limit_of else None
+        bigger = min(MAX_RETRY_TOKENS, limit * 2) if limit else 0
+        if not bigger or bigger <= limit:
+            return msg
+        self._emit("output_truncated", turn_id=turn_id, limit=limit, new_limit=bigger, retrying=True)
+        partial["text"].clear()
+        partial["reasoning"].clear()
+        retry = self._chat_turn(messages, turn_id, tools=tools, on_text=emit_text,
+                                on_reasoning=emit_reasoning, max_tokens=bigger)
+        if retry.get("stop") == "length":
+            retry["limit"] = self.llm.output_limit(bigger)  # the server may have capped it lower
+        return retry
+
+    def _finish_truncated(self, msg, turn_id):
+        """Still cut off: keep what came back, say so, and let the user press Continue."""
+        limit = msg.pop("limit", None) or (self.llm.output_limit() if hasattr(self.llm, "output_limit") else None)
+        if msg.pop("tool_calls", None):
+            msg.pop("provider_state", None)  # its tool_use blocks would have no results
+        partial = (msg.get("content") or "").rstrip()
+        notice = truncation_notice(limit)
+        msg["content"] = f"{partial}\n\n{notice}" if partial else notice
+        self._record_assistant(msg, turn_id)
+        self.episodes.log("jarvis", msg["content"])
+        self._emit("assistant_message", turn_id=turn_id, content=partial)
+        self._emit("turn_finished", turn_id=turn_id, status="length", limit=limit)
+        self.audit.log("turn", self.session_id, turn_id, "turn_finished", "length")
+        self._active_turn = ""
+        return msg["content"]
 
     def _record_assistant(self, msg, turn_id):
         """Append a model reply to history/session and announce its speed stats."""
@@ -478,9 +529,10 @@ class Jarvis:
     def _emit(self, kind, turn_id="", **data):
         self.events.emit(Event(kind, self.session_id, turn_id=turn_id, data=data))
 
-    def _chat_turn(self, messages, turn_id, tools=None, on_text=None, on_reasoning=None):
+    def _chat_turn(self, messages, turn_id, tools=None, on_text=None, on_reasoning=None, max_tokens=None):
+        extra = {"max_tokens": max_tokens} if max_tokens else {}
         try:
-            return self.llm.chat(messages, tools=tools, on_text=on_text, on_reasoning=on_reasoning)
+            return self.llm.chat(messages, tools=tools, on_text=on_text, on_reasoning=on_reasoning, **extra)
         except Cancelled:
             raise
         except Exception as e:

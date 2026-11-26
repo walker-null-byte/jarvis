@@ -17,8 +17,9 @@ have Jarvis's own LLM produce a complete, validated plugin, then keep changing i
    small: "add a field" is one upsert, not a re-emitted manifest.
 3. **Strict checks.** `load_manifest` is lenient on purpose (unknown keys = warnings) so that
    imports of newer plugins still load. For generated plugins **every warning is a problem**,
-   plus extra checks (below). Install is impossible while problems remain; each mutating tool
-   returns the current problems so the model repairs as it goes.
+   plus extra checks (below). What is merely not written yet is an **agent todo**, not a problem.
+   Install is impossible while either list is non-empty; each mutating tool returns both
+   lists so the model works through them as it goes.
 4. **Reuse the import path.** Finishing a draft = `manager.stage(files, source=...)` → the
    existing review card → `manager.install(token, mode, trust)`. The trust gate, data
    preservation on upgrade and the review UI all carry over. Changed Python means the code
@@ -56,13 +57,21 @@ strings with `\n`); lists of dicts (fields, inputs) as inline tables, one per li
 round-trip: `tomllib.loads(render_toml(d)) == d` for any JSON-able manifest data (test with the
 Lead Finder manifest). Key order: keep the order of the input dict. Reject non-JSON types.
 
-### Strict check: `check_draft(folder, manifest_data) -> {ok, problems: [str], notes: [str], tools: [...]}`
-Problems (block install):
+### Strict check: `check_draft(folder, manifest_data) -> {ok, todo: [str], problems: [str], notes: [str], tools: [...]}`
+`ok` is true only when `todo` and `problems` are both empty.
+
+Agent todo (parts the builder has not written yet; worded as tasks, block install):
+- Empty `description`: "Write the description: ...".
+- `prompt.md` still the placeholder ("The builder has not written this agent's prompt yet.") or
+  shorter than ~80 characters: "Write prompt.md: the agent's role, workflow and rules ...".
+- An action whose prompt is shorter than ~20 chars: "Write the prompt of action 'id': ...".
+
+Problems (things that are wrong; block install):
 - `ManifestError` issues and **all** `load_manifest` warnings (formatted with `format_issue`).
 - `agent.core_tools` names that aren't Jarvis tools (ask the registry; list the valid ones in the message).
 - `icon` not a known icon name (the union of icons.js + agent_icons.js names; keep the list in
   Python, e.g. `KNOWN_ICONS`) unless `icon.svg` exists (and passes `packaging.check_svg`).
-- `prompt.md` missing or shorter than ~80 characters.
+- `prompt.md` missing (the manifest check reports it).
 - For each `tools/*.py` (static only, never imported/executed here):
   - `ast.parse` fails → problem with line number.
   - non-`_` file without a top-level `def register(ctx)`, or `register` that defines no
@@ -80,13 +89,13 @@ Problems (block install):
     `ghp_…`, 32+ hex/base64-ish strings assigned to names containing key/token/secret) → problem
     "use a secret setting and ctx.settings[...] instead".
 - Secret-looking settings (key contains KEY/TOKEN/SECRET/PASSWORD) whose type isn't `secret` → problem.
-- Actions whose prompt is shorter than ~20 chars → problem.
 Notes (shown, not blocking): what each tools file uses (network, files, eval/exec, threads),
 tool names per file, settings the user must fill in after install (required ones).
 `tools` = `[{file, tools: [names], imports: [...], uses: [...]}]` for the preview.
 
 ### Builder tools (the builder profile's `extra_tools`; all operate on one draft)
-Each mutating tool returns `{"ok": bool, "problems": [...first 15...], "summary": "<one line>"}`
+Each mutating tool returns `{"ok": bool, "todo": [...first 15...], "problems": [...first 15...], "summary": "<one line>"}`
+(plus `more_todo` / `more_problems` counts when cut)
 and emits an `agent_draft_changed` event `{draft_id}` on the event bus.
 
 | tool | purpose |
@@ -195,10 +204,10 @@ Draft JSON:
  name, icon, version, description,
  manifest: <raw manifest data>,
  files: [{path, size}],
- check: {ok, problems: [...], notes: [...], tools: [...]},
+ check: {ok, todo: [...], problems: [...], notes: [...], tools: [...]},
  target_name}
 ```
-Summary (list): `{id, mode, target, target_name, name, icon, updated, ok, problem_count, busy}`.
+Summary (list): `{id, mode, target, target_name, name, icon, updated, ok, problem_count, todo_count, busy}`.
 
 ## UI
 
@@ -216,7 +225,8 @@ Summary (list): `{id, mode, target, target_name, name, icon, updated, ok, proble
     few suggestions ("Add a field…", "Add a button that…", "Make the messages shorter").
   - Right: **live preview** of the draft, refreshed on `agent_draft_changed` events and when the
     turn ends: tile + name + version + description; a status line: "Ready to install" (green)
-    or "N problems" (expandable list); sections Actions (label, description, input chips),
+    and, separately, "Agent todo: N" (neutral, unchecked task list) and "N problems" (warning, expandable
+    lists); sections Actions (label, description, input chips),
     Records (table → field chips with type), Settings (label + type, secrets marked with a lock),
     Exports, Python tools (file → tool names, "uses: network" notes, a "View code" toggle that
     loads the file read-only in a <pre>), Permissions chips (same as review card), Files.
@@ -230,7 +240,7 @@ Summary (list): `{id, mode, target, target_name, name, icon, updated, ok, proble
   built-in, its tooltip/confirm says it makes your own copy. → POST /agents/{id}/edit-draft →
   navigate to the builder view.
 - **Agents grid**: a "Drafts" row above the cards when drafts exist (tile, name, "editing
-  <Target>" or "new", problems/ready badge, Resume, Discard).
+  <Target>" or "new", "N to do" / "N problems" / ready badge, Resume, Discard).
 - Approval requests from `draft_test_tool` must show in the builder chat like any other
   approval card (check the chat component handles approval events for agent sessions).
 

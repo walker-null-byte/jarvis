@@ -3,17 +3,26 @@
 import json
 import re
 
+from . import effort as effort_mod
 from .errors import LLMError
 from .openai_chat import resolve_key
 
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 THINKING_BETA = "thinking-binding-controls-2026-08-01"
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
-MIN_MAX_TOKENS = 32000
+MIN_MAX_TOKENS = 16384  # matches the default llm.max_tokens; adaptive thinking needs room
 # Models that get server-side refusal fallbacks.
 FALLBACK_MODELS = {
     "claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
 }
+
+
+_STOP = {"end_turn": "end", "stop_sequence": "end", "tool_use": "tool_calls", "max_tokens": "length"}
+
+
+def stop_reason(raw):
+    """Normalise an Anthropic stop_reason ("refusal", "pause_turn", ... pass through)."""
+    return _STOP.get(raw, raw) if raw else None
 
 
 def supports_thinking(model):
@@ -107,7 +116,7 @@ def final_to_message(final, model):
         text = "The model declined this request."
         if category:
             text += f" (category: {category})"
-        return {"role": "assistant", "content": text}
+        return {"role": "assistant", "content": text, "stop": "refusal"}
 
     text_parts, thinking_parts, tool_calls, items = [], [], [], []
     for block in final.content:
@@ -124,10 +133,9 @@ def final_to_message(final, model):
                 # Inputs stream unvalidated; Jarvis validates against the schema.
                 "function": {"name": block.name, "arguments": json.dumps(block.input or {})},
             })
-    content = "".join(text_parts)
-    if stop == "max_tokens":
-        content += "\n\n[response truncated]"
-    msg = {"role": "assistant", "content": content}
+    msg = {"role": "assistant", "content": "".join(text_parts)}
+    if stop:
+        msg["stop"] = stop_reason(stop)
     if tool_calls:
         msg["tool_calls"] = tool_calls
     reasoning = "".join(thinking_parts)
@@ -152,7 +160,7 @@ class AnthropicBackend:
         self.api_key = resolve_key(llm)
         self.timeout = float(llm.get("timeout", 120))
         self.max_tokens = int(llm.get("max_tokens") or 0)
-        self.effort = llm.get("effort") or ""
+        self.effort = effort_mod.normalize(llm.get("effort"))
         self._client_obj = None
 
     def _client(self):
@@ -178,12 +186,15 @@ class AnthropicBackend:
         if self.model not in ids:
             raise ValueError(f"model {self.model!r} is not in the account's model list")
 
-    def build_request(self, messages, tools=None):
+    def effective_max_tokens(self, override=None):
+        return max(int(override or self.max_tokens), MIN_MAX_TOKENS)
+
+    def build_request(self, messages, tools=None, max_tokens=None):
         """Keyword arguments for ``client.beta.messages.stream``."""
         system, converted = to_anthropic_messages(messages, self.model)
         kwargs = {
             "model": self.model,
-            "max_tokens": max(self.max_tokens, MIN_MAX_TOKENS),
+            "max_tokens": self.effective_max_tokens(max_tokens),
             "messages": converted,
             "cache_control": {"type": "ephemeral"},
             "betas": [],
@@ -192,15 +203,15 @@ class AnthropicBackend:
             kwargs["system"] = [{"type": "text", "text": system}]
         if tools:
             kwargs["tools"] = to_anthropic_tools(tools)
-        if supports_thinking(self.model):
+        if supports_thinking(self.model) and self.effort != "off":
             kwargs["thinking"] = {
                 "type": "adaptive",
                 "display": "summarized",
                 "block_binding": {"prefix_mismatch_behavior": "drop_block"},
             }
             kwargs["betas"].append(THINKING_BETA)
-        if self.effort:
-            kwargs["output_config"] = {"effort": self.effort}
+        if self.effort and self.effort != "off":
+            kwargs["output_config"] = {"effort": "low" if self.effort == "minimal" else self.effort}
         if self.model in FALLBACK_MODELS:
             kwargs["fallbacks"] = "default"
             kwargs["betas"].append(FALLBACK_BETA)
@@ -208,9 +219,9 @@ class AnthropicBackend:
             del kwargs["betas"]
         return kwargs
 
-    def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
+    def chat(self, messages, tools=None, on_text=None, on_reasoning=None, max_tokens=None):
         client = self._client()
-        kwargs = self.build_request(messages, tools)
+        kwargs = self.build_request(messages, tools, max_tokens)
         got_output = False
         try:
             with client.beta.messages.stream(**kwargs) as stream:

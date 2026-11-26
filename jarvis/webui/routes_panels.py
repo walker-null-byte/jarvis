@@ -617,6 +617,36 @@ def set_setting(body: SettingBody, state: WebState = Depends(web)):
     return {"output": output, "status": state.status()}
 
 
+class LlmOptionsBody(BaseModel):
+    effort: str | None = None       # "" Auto, "off", "low", "medium", "high" (+ xhigh/max)
+    max_tokens: int | None = None   # output budget per reply
+
+
+@router.post("/llm/options")
+def set_llm_options(body: LlmOptionsBody, state: WebState = Depends(web)):
+    """The composer's Thinking and Max output controls: applied now, remembered across restarts."""
+    from ..config import save_runtime_overrides
+    from ..providers.effort import VALID
+    llm = state.jarvis.config["llm"]
+    changed = []
+    if body.effort is not None:
+        effort = body.effort.strip().lower()
+        if effort not in VALID:
+            fail(400, f"Thinking must be one of: auto, {', '.join(v for v in VALID if v)}")
+        llm["effort"] = effort
+        changed.append("llm.effort")
+    if body.max_tokens is not None:
+        if not 256 <= body.max_tokens <= 262144:
+            fail(400, "Max output must be between 256 and 262,144 tokens")
+        llm["max_tokens"] = body.max_tokens
+        changed.append("llm.max_tokens")
+    if changed:
+        state.jarvis.llm.reconfigure(state.jarvis.config)
+        save_runtime_overrides(state.jarvis.config, changed)
+        state.emit("config_changed", section="llm", key=changed[0])
+    return {"effort": llm.get("effort", ""), "max_tokens": llm["max_tokens"], "status": state.status()}
+
+
 @router.post("/settings/save")
 def save_settings(state: WebState = Depends(web)):
     return {"output": _command(state, "/settings", "save")}

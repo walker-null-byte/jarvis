@@ -47,12 +47,21 @@ dialog.agent-new { width: min(620px, 94vw); }
 .bp-status > *:first-child, .bp-status summary { display: flex; align-items: center; gap: var(--s2); }
 .bp-status.ok { display: flex; align-items: center; gap: var(--s2); color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); background: color-mix(in srgb, var(--ok) 9%, var(--panel)); }
 .bp-status.ok .note { margin-left: auto; color: var(--muted); }
-.bp-status.bad { color: var(--text); border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); background: color-mix(in srgb, var(--danger) 8%, var(--panel)); }
+.bp-status.bad { color: var(--text); border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); background: color-mix(in srgb, var(--warn) 8%, var(--panel)); }
 .bp-status.bad summary { cursor: pointer; list-style: none; }
 .bp-status.bad summary::-webkit-details-marker { display: none; }
-.bp-status.bad summary .icon { color: var(--danger); }
-.bp-status.bad summary strong { color: var(--danger); }
+.bp-status.bad summary .icon { color: var(--warn); }
+.bp-status.bad summary strong { color: var(--warn); }
 .bp-status.bad summary .note { margin-left: auto; font-size: 12.5px; }
+.bp-statuses { display: flex; flex-direction: column; gap: var(--s2); }
+.bp-status.todo { color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
+.bp-status.todo summary { cursor: pointer; list-style: none; }
+.bp-status.todo summary::-webkit-details-marker { display: none; }
+.bp-status.todo summary .icon { color: var(--accent); }
+.bp-status.todo summary .note { margin-left: auto; font-size: 12.5px; }
+.bp-status ul.bp-tasks { list-style: none; padding-left: 0; }
+.bp-tasks li { position: relative; padding-left: 1.7em; margin-bottom: 4px; }
+.bp-tasks li::before { content: ""; position: absolute; left: 2px; top: 0.28em; width: 0.95em; height: 0.95em; border: 1.5px solid var(--muted); border-radius: 3px; }
 .bp-status ul { margin: var(--s2) 0 0; padding-left: 1.3em; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .bp-section { min-width: 0; }
 .bp-count { margin-left: var(--s2); font: 11px var(--mono); color: var(--muted); }

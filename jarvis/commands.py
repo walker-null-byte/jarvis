@@ -27,6 +27,7 @@ SETTING_PATHS = (
     "llm.api_key_env",
     "llm.stream",
     "llm.max_tokens",
+    "llm.effort",
     "llm.timeout",
     "llm.retries",
     "llm.retry_delay",
@@ -727,6 +728,9 @@ def _write_setting(jarvis, path, raw):
     section, key = path.split(".", 1)
     current = jarvis.config[section].get(key)
     value = _coerce(raw, current)
+    if path == "llm.effort":
+        from .providers.effort import normalize
+        value = normalize(value)
     if path == "agent.tool_mode" and value not in ("search", "all"):
         return "agent.tool_mode must be 'search' or 'all'"
     if path == "agent.character":

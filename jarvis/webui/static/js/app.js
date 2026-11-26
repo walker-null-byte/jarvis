@@ -3,6 +3,7 @@
 import { api, EventStream } from "./api.js";
 import { avatar } from "./avatar.js";
 import { Chat } from "./chat.js";
+import { ComposerOptions } from "./composer_options.js";
 import { el, toast } from "./dom.js";
 import { icon, setIcon } from "./icons.js";
 import { openOnboarding } from "./onboarding.js";
@@ -184,6 +185,7 @@ function updateHeader() {
   }
   $("model-label").textContent = `${shortLabel(s.provider)} · ${s.model || "no model"}`;
   $("model-pill").title = "Switch model or provider";
+  ctx.composerOptions?.sync();
   const btn = $("character-btn");
   btn.replaceChildren(avatar(s.character || { name: "J" }, 22), el("span", { class: "pill-text", text: s.character?.name || "Jarvis" }), icon("down", 13));
 }
@@ -377,6 +379,8 @@ $("scrim").addEventListener("click", () => { ctx.closeRail(); setDrawer(false); 
 // ---------- model switcher & character switcher ----------
 
 ctx.switcher = new Switcher($("model-pill"), $("model-menu"), ctx);
+ctx.composerOptions = new ComposerOptions($("think-pill"), $("think-menu"), ctx);
+ctx.composerOptions.sync();
 
 const characterMenu = $("character-menu");
 function closeCharacterMenu() {
@@ -626,6 +630,7 @@ document.addEventListener("keydown", (event) => {
     if (document.querySelector("dialog[open]")) return; // dialogs close themselves
     if (!characterMenu.hidden) closeCharacterMenu();
     else if (ctx.switcher.isOpen) ctx.switcher.close();
+    else if (ctx.composerOptions.isOpen) ctx.composerOptions.close();
     else if (document.body.classList.contains("rail-open")) ctx.closeRail();
     else if (ctx.busy) cancelTurn();
   }

@@ -649,6 +649,37 @@ export class Chat {
     this.add(node);
   }
 
+  // The model's reply was cut off at its output limit and is being retried with a larger one:
+  // clear the half-streamed bubble (the cut-off text is discarded server-side too) and say why.
+  supersede(data) {
+    const cur = this.cur;
+    if (!cur) return;
+    this.finishReasoning(cur);
+    cur.body.replaceChildren();
+    cur.segs = [];
+    cur.seg = null;
+    cur.root.classList.remove("thinking");
+    this.streamed = false;
+    cur.body.append(el("div", { class: "retry-note", role: "status" }, icon("info", 14),
+      el("span", { text: `The reply was cut off at ${Number(data.limit).toLocaleString()} tokens; retrying with a larger limit (${Number(data.new_limit).toLocaleString()}).` })));
+    this.scrollDown();
+  }
+
+  // The reply was cut off again: say how to fix it and offer Continue.
+  lengthNote(limit) {
+    const button = el("button", { type: "button", class: "small", text: "Continue", onclick: () => {
+      node.remove();
+      this.hooks.suggest("Continue where you left off.");
+    } });
+    const message = limit
+      ? [`The model ran out of output tokens (limit ${Number(limit).toLocaleString()}) before finishing. Raise `,
+        el("em", { text: "Max output" }), " in the composer's model options, then press Continue."]
+      : ["The model ran out of output tokens before finishing. Press Continue."];
+    const node = el("div", { class: "turn-note continue-note length-note", role: "status" },
+      icon("alert", 15), el("span", {}, ...message), button);
+    this.add(node);
+  }
+
   // ---------- live events ----------
 
   handle(msg) {
@@ -683,11 +714,13 @@ export class Chat {
       case "artifact_created": this.artifactCard(data.artifact); break;
       case "approval_requested": this.approvalRequested(data); break;
       case "approval_finished": this.approvalFinished(data); break;
+      case "output_truncated": if (data.retrying) this.supersede(data); break;
       case "assistant_stats": this.addStats(data.stats); break;
       case "error": this.errorBanner(data); break;
       case "turn_finished":
         if (data.status === "cancelled") this.note("Turn cancelled");
         if (data.status === "budget_exhausted") this.continueNote();
+        if (data.status === "length") this.lengthNote(data.limit);
         break;
     }
   }

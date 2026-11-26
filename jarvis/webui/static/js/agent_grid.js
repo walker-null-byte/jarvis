@@ -27,11 +27,18 @@ export function mountGrid(container, ctx) {
     } catch { draftsBox.hidden = true; }
   }
 
+  function draftBadge(d) {
+    const parts = [];
+    if (d.todo_count) parts.push(`${d.todo_count} to do`);
+    if (d.problem_count) parts.push(`${d.problem_count} problem${d.problem_count === 1 ? "" : "s"}`);
+    return parts.join(" · ") || "Not ready";
+  }
+
   function draftRow(d) {
     const edit = d.mode === "edit";
     const badge = d.busy ? el("span", { class: "badge", text: "Building…" })
       : d.ok ? el("span", { class: "badge ok", text: "Ready" })
-      : el("span", { class: "badge warn", text: `${d.problem_count} problem${d.problem_count === 1 ? "" : "s"}` });
+      : el("span", { class: d.problem_count ? "badge warn" : "badge", text: draftBadge(d) });
     const discard = async () => {
       if (!await confirmBox(`Discard "${d.name || "this draft"}"?`, edit ? "Your changes are thrown away. The installed agent stays as it is." : "The agent being built is thrown away.")) return;
       try { await request(`/agent-drafts/${encodeURIComponent(d.id)}`, { method: "DELETE" }); toast("Draft discarded"); loadDrafts(); }

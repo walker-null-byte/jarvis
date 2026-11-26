@@ -57,9 +57,9 @@ class CloudflareBackend(ChatBackend):
             raise LLMError("No Cloudflare API token. Paste one in Settings or set CLOUDFLARE_API_TOKEN.",
                            retryable=False)
 
-    def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
+    def chat(self, messages, tools=None, on_text=None, on_reasoning=None, max_tokens=None):
         self._require_setup()
-        return super().chat(messages, tools, on_text, on_reasoning)
+        return super().chat(messages, tools, on_text, on_reasoning, max_tokens)
 
     def check_model(self, ids, timeout=5.0):
         self._require_setup()

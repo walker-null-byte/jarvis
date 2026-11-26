@@ -5,6 +5,7 @@ import re
 
 from openai import OpenAI
 
+from . import effort as effort_mod
 from .thinking import ThinkSplitter, split_all
 
 
@@ -28,8 +29,31 @@ GEMINI_DUMMY_SIGNATURE = "skip_thought_signature_validator"
 _MESSAGE_KEYS = ("role", "content", "name", "tool_call_id", "tool_calls")
 _OPTIONAL_HINTS = {
     "stream_options": re.compile(r"stream_options|include_usage|stream option", re.I),
-    "extra_body": re.compile(r"thinking|include_thoughts|extra_body|\bgoogle\b", re.I),
+    "reasoning_effort": re.compile(r"reasoning_effort|reasoning effort", re.I),
+    "extra_body": re.compile(r"thinking|include_thoughts|extra_body|\bgoogle\b|\breasoning\b(?!_effort)", re.I),
 }
+_TOKEN_HINT = re.compile(r"max_tokens|max_completion_tokens|maximum|output tokens|completion tokens", re.I)
+_CONTEXT_HINT = re.compile(r"context (length|window)|context_length|input tokens|prompt", re.I)
+_CAP_NUMBER = re.compile(
+    r"(?:at most|no more than|up to|maximum(?: value| allowed| of| is| output)?|limit(?: is| of)?|<=|"
+    r"less than or equal to|between 1 and|range)\D{0,40}?(\d[\d,]{2,})", re.I)
+FALLBACK_CAP = 4096
+
+
+def parse_token_cap(text, requested):
+    """The output limit a server names in a max_tokens rejection, else FALLBACK_CAP."""
+    for match in _CAP_NUMBER.finditer(text or ""):
+        value = int(match.group(1).replace(",", ""))
+        if 0 < value < requested:
+            return value
+    return min(FALLBACK_CAP, max(1, requested - 1))
+
+
+def stop_reason(raw):
+    """Normalise a Chat Completions finish_reason (None when the server sent none)."""
+    if not raw:
+        return None
+    return {"stop": "end", "function_call": "tool_calls"}.get(raw, raw)
 _VAGUE_REJECTION = re.compile(
     r"additional propert|unrecogni[sz]ed|unknown (field|parameter|argument|name)|"
     r"unsupported parameter|extra inputs|not permitted|unexpected (field|keyword)", re.I)
@@ -115,6 +139,10 @@ class ChatBackend:
         self.gemini = is_gemini(self.base_url)
         self.deepseek = llm.get("provider") == "deepseek"
         self.dropped = set()  # optional request fields this server rejected
+        self.cap = None       # output limit this server insisted on (see _create)
+        self.token_key = "max_tokens"
+        self.provider = llm.get("provider", "custom")
+        self.effort = effort_mod.normalize(llm.get("effort"))
         self.client = OpenAI(
             base_url=llm["base_url"],
             api_key=resolve_key(llm),
@@ -138,43 +166,74 @@ class ChatBackend:
             timeout=timeout,
         )
 
-    def _request(self, messages, tools):
+    def effective_max_tokens(self, override=None):
+        limit = int(override or self.max_tokens)
+        return min(limit, self.cap) if self.cap else limit
+
+    def _request(self, messages, tools, max_tokens=None):
         kwargs = {"model": self.model, "messages": clean_messages(messages, self.gemini, self.deepseek),
-                  "max_tokens": self.max_tokens}
+                  self.token_key: self.effective_max_tokens(max_tokens)}
         if tools:
             kwargs["tools"] = tools
         if self.stream and "stream_options" not in self.dropped:
             kwargs["stream_options"] = {"include_usage": True}
-        if self.gemini and "extra_body" not in self.dropped:
+        top, body = effort_mod.chat_fields(self.provider, self.base_url, self.model, self.effort)
+        if "reasoning_effort" in top and "reasoning_effort" not in self.dropped:
+            kwargs["reasoning_effort"] = top["reasoning_effort"]
+        if self.gemini and self.effort != "off":
             # Thought summaries; they come back inline as <thought>...</thought>.
-            kwargs["extra_body"] = {"extra_body": {"google": {"thinking_config": {"include_thoughts": True}}}}
+            body = {**body, "extra_body": {"google": {"thinking_config": {"include_thoughts": True}}}}
+        if body and "extra_body" not in self.dropped:
+            kwargs["extra_body"] = body
         return kwargs
 
     def _create(self, kwargs, **extra):
-        """create(), retrying once without optional fields the server rejects.
+        """create(), retrying when the server rejects an optional field or the output limit.
 
-        Some OpenAI-compatible servers refuse ``stream_options`` (or Gemini's
-        thinking config) with a 400/422. Which ones is remembered for the
-        lifetime of this client so only the first request pays for the retry.
+        Some OpenAI-compatible servers refuse ``stream_options``, ``reasoning_effort`` or
+        Gemini's thinking config with a 400/422; others cap max_tokens below what was asked
+        (or want ``max_completion_tokens``). Each fix is applied once, then remembered for
+        the lifetime of this client so only the first request pays for the retry.
         """
-        try:
-            return self.client.chat.completions.create(**kwargs, **extra)
-        except Exception as error:
-            if getattr(error, "status_code", None) not in (400, 422):
-                raise
-            text = f"{error} {getattr(error, 'body', '')}"
-            present = [k for k in _OPTIONAL_HINTS if k in kwargs]
-            named = [k for k in present if _OPTIONAL_HINTS[k].search(text)]
-            if not named and present and _VAGUE_REJECTION.search(text):
-                named = present
-            if not named:
-                raise
-            self.dropped.update(named)
-            retry = {k: v for k, v in kwargs.items() if k not in named}
-            return self.client.chat.completions.create(**retry, **extra)
+        fixed = set()
+        while True:
+            try:
+                return self.client.chat.completions.create(**kwargs, **extra)
+            except Exception as error:
+                if getattr(error, "status_code", None) not in (400, 422):
+                    raise
+                text = f"{error} {getattr(error, 'body', '')}"
+                kwargs = self._fix_request(kwargs, text, fixed)
+                if kwargs is None:
+                    raise
 
-    def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
-        kwargs = self._request(messages, tools)
+    def _fix_request(self, kwargs, text, fixed):
+        """kwargs adjusted for what the rejection says, or None when it is not fixable."""
+        key = self.token_key
+        if key in kwargs and "tokens" not in fixed and _TOKEN_HINT.search(text):
+            asked = kwargs[key]
+            if key == "max_tokens" and "max_completion_tokens" in text and re.search(
+                    r"unsupported|not supported|instead|use max_completion", text, re.I):
+                self.token_key = "max_completion_tokens"
+                fixed.add("tokens")
+                return {("max_completion_tokens" if k == "max_tokens" else k): v for k, v in kwargs.items()}
+            if isinstance(asked, int) and asked > 1 and not (
+                    _CONTEXT_HINT.search(text) and not re.search(r"max_(completion_)?tokens", text)):
+                self.cap = parse_token_cap(text, asked)
+                fixed.add("tokens")
+                return {**kwargs, key: self.cap}
+        present = [k for k in _OPTIONAL_HINTS if k in kwargs]
+        named = [k for k in present if _OPTIONAL_HINTS[k].search(text)]
+        if not named and present and _VAGUE_REJECTION.search(text):
+            named = present
+        if not named or set(named) <= fixed:
+            return None
+        self.dropped.update(named)
+        fixed.update(named)
+        return {k: v for k, v in kwargs.items() if k not in named}
+
+    def chat(self, messages, tools=None, on_text=None, on_reasoning=None, max_tokens=None):
+        kwargs = self._request(messages, tools, max_tokens)
         if not self.stream:
             return self._blocking(kwargs, on_text, on_reasoning)
         return self._streaming(kwargs, on_text, on_reasoning)
@@ -182,6 +241,7 @@ class ChatBackend:
     def _blocking(self, kwargs, on_text, on_reasoning):
         response = self._create(kwargs)
         choice = response.choices[0].message
+        stop = stop_reason(getattr(response.choices[0], "finish_reason", None))
         inline, content = split_all(choice.content or "")
         reasoning = (_reasoning_of(choice) + inline).strip()
         msg = {"role": "assistant", "content": content}
@@ -202,6 +262,8 @@ class ChatBackend:
                     call["extra_content"] = extra
                 calls.append(call)
             msg["tool_calls"] = calls
+        if stop:
+            msg["stop"] = stop
         usage = _usage_of(getattr(response, "usage", None))
         if usage:
             msg["usage"] = usage
@@ -214,6 +276,7 @@ class ChatBackend:
         reasoning_parts = []
         tool_calls = {}  # index -> accumulating call dict
         usage = None
+        stop = None
         splitter = ThinkSplitter()
 
         def emit(pieces):
@@ -232,6 +295,7 @@ class ChatBackend:
                 usage = _usage_of(getattr(chunk, "usage", None)) or usage
                 if not chunk.choices:
                     continue
+                stop = stop_reason(getattr(chunk.choices[0], "finish_reason", None)) or stop
                 delta = chunk.choices[0].delta
                 if delta is None:
                     continue
@@ -274,6 +338,8 @@ class ChatBackend:
                 if not tool_calls[i]["id"]:
                     tool_calls[i]["id"] = f"call_{i}"
             msg["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+        if stop:
+            msg["stop"] = stop
         if usage:
             msg["usage"] = usage
         return msg

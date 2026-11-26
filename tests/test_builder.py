@@ -15,7 +15,7 @@ except ModuleNotFoundError:  # Python 3.10
 
 from jarvis.runtime import profile_for
 from jarvis.specialists import builder as builder_mod
-from jarvis.specialists.builder import (KNOWN_ICONS, bump_patch, check_draft, file_changes, guide_section,
+from jarvis.specialists.builder import (KNOWN_ICONS, PLACEHOLDER_PROMPT, bump_patch, check_draft, file_changes, guide_section,
                                         manifest_changes, render_toml)
 from jarvis.specialists.manager import AgentError
 from jarvis.specialists.tool_runner import run_tool_subprocess
@@ -62,9 +62,18 @@ def folder_for(tmp_path, data=None, tools=None, prompt=PROMPT, extra=None):
     return folder
 
 
-def problems_of(tmp_path, data=None, **kwargs):
+def sub(tmp_path, name):
+    (tmp_path / name).mkdir()
+    return tmp_path / name
+
+
+def check_of(tmp_path, data=None, **kwargs):
     folder = folder_for(tmp_path, data, **kwargs)
-    return check_draft(folder, manifest() if data is None else data, JARVIS_TOOLS)["problems"]
+    return check_draft(folder, manifest() if data is None else data, JARVIS_TOOLS)
+
+
+def problems_of(tmp_path, data=None, **kwargs):
+    return check_of(tmp_path, data, **kwargs)["problems"]
 
 
 # ---------- render_toml ----------
@@ -115,11 +124,27 @@ def test_check_manifest_issues_and_warnings(tmp_path):
 def test_check_core_tools_icon_prompt_and_action(tmp_path):
     data = manifest(icon="nope", agent={"prompt": "prompt.md", "core_tools": ["web_search", "teleport"]},
                     actions=[{"id": "go", "prompt": "short"}])
-    found = "\n".join(problems_of(tmp_path, data, prompt="too short"))
+    check = check_of(tmp_path, data, prompt="too short")
+    found = "\n".join(check["problems"])
     assert "'teleport' is not a Jarvis tool" in found and "web_search" in found.split("Valid names:")[1]
     assert "icon: 'nope' is not a known icon" in found
-    assert "prompt.md: is only 9 characters" in found
-    assert "actions → go: the prompt is too short" in found
+    assert "prompt.md" not in found and "action" not in found  # unfinished parts are todo, not problems
+    assert check["todo"] == [
+        "Write prompt.md: the agent's role, workflow and rules (at least 80 characters) with draft_write_file.",
+        "Write the prompt of action 'go': say what the agent should do, step by step (at least 20 characters).",
+    ]
+    assert check["ok"] is False
+
+
+def test_todo_blocks_install_on_its_own_and_is_separate_from_problems(tmp_path):
+    ok = check_of(tmp_path)
+    assert ok["ok"] and ok["todo"] == [] and ok["problems"] == []
+    todo_only = check_of(sub(tmp_path, "a"), manifest(description=""), prompt=PLACEHOLDER_PROMPT + "\n")
+    assert todo_only["ok"] is False and todo_only["problems"] == []
+    assert todo_only["todo"][0].startswith("Write the description")
+    assert todo_only["todo"][1].startswith("Write prompt.md")
+    wrong_only = check_of(sub(tmp_path, "b"), manifest(flavour="x"))
+    assert wrong_only["ok"] is False and wrong_only["todo"] == [] and wrong_only["problems"]
 
 
 def test_check_icon_svg_replaces_known_icon(tmp_path):
@@ -296,7 +321,9 @@ def test_start_creates_a_least_privilege_draft_and_chat(benv):
     assert draft["manifest"]["permissions"] == {"network": False, "commands": False, "files": "data"}
     assert draft["manifest"]["id"] and draft["name"] and draft["version"] == "0.1.0" and draft["icon"] == "agents"
     assert [f["path"] for f in draft["files"]] == ["agent.toml", "prompt.md"]
-    assert draft["check"]["ok"] is False and any("prompt.md" in p for p in draft["check"]["problems"])
+    assert draft["check"]["ok"] is False and draft["check"]["problems"] == []
+    assert any(t.startswith("Write prompt.md") for t in draft["check"]["todo"])
+    assert any(t.startswith("Write the description") for t in draft["check"]["todo"])
     assert draft["session_id"] and benv.state.builder.get(draft["id"])["busy"] is False
     history = benv.state.runtimes.get(draft["session_id"]).history
     assert history[0]["content"] == "An agent that tracks books I want to read"
@@ -313,8 +340,10 @@ def test_builder_session_profile_and_hidden_from_chat_list(benv):
             "draft_write_file", "draft_edit_file", "draft_read_file", "draft_delete_file", "draft_check",
             "builder_guide", "agent_example", "draft_test_tool"} == set(profile.extra_tools)
     assert "run_command" in profile.hidden_tools and "write_file" in profile.hidden_tools
-    assert "Check: 1 problem" in profile.system_prompt  # live state, not a snapshot
-    benv.state.builder.tools(draft["id"])["draft_write_file"]("prompt.md", PROMPT)
+    assert "Agent todo (2):" in profile.system_prompt  # live state, not a snapshot
+    t = benv.state.builder.tools(draft["id"])
+    t["draft_write_file"]("prompt.md", PROMPT)
+    t["draft_set"]({"description": "Tracks the books I want to read."})
     assert "prompt.md (" in profile.system_prompt and "Check: READY" in profile.system_prompt
     listed = benv.client.get("/api/sessions").json()["sessions"]
     assert draft["session_id"] not in {s["id"] for s in listed}
@@ -427,7 +456,8 @@ def test_events_and_results_carry_problems(benv):
     t = benv.state.builder.tools(draft["id"])
     reply = t["draft_set"]({"description": "d"})
     assert reply["ok"] is False and reply["summary"] == "Updated description"
-    assert any("prompt.md" in p for p in reply["problems"])
+    assert reply["problems"] == [] and any(t.startswith("Write prompt.md") for t in reply["todo"])
+    assert not any(t.startswith("Write the description") for t in reply["todo"])
     changed = [e for e in events if e.kind == "agent_draft_changed"]
     assert changed and changed[-1].data == {"draft_id": draft["id"]} and changed[-1].session_id == draft["session_id"]
     bad = t["draft_write_file"]("tools/t.py", "def register(ctx:\n")
@@ -775,7 +805,7 @@ def test_builder_routes(benv):
                           "name", "icon", "version", "description", "manifest", "files", "check", "target_name"}
     listing = client.get("/api/agent-drafts").json()["drafts"]
     assert listing[0] == {"id": draft["id"], "mode": "new", "target": None, "target_name": "", "name": "Books",
-                          "icon": "agents", "updated": listing[0]["updated"], "ok": False, "problem_count": 1, "busy": False}
+                          "icon": "agents", "updated": listing[0]["updated"], "ok": False, "problem_count": 0, "todo_count": 2, "busy": False}
     assert client.get(f"/api/agent-drafts/{draft['id']}").json()["id"] == draft["id"]
     assert client.get("/api/agent-drafts/zzzz").status_code == 404
     file = client.get(f"/api/agent-drafts/{draft['id']}/file", params={"path": "prompt.md"}).json()

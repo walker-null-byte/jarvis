@@ -10,6 +10,7 @@ access token.
 import httpx
 from openai import OpenAI
 
+from . import effort as effort_mod
 from .chatgpt_auth import RESOURCE, get_chatgpt_auth
 from .errors import LLMError
 
@@ -100,6 +101,9 @@ class ChatGPTBackend:
     def __init__(self, llm):
         self.model = llm["model"]
         self.timeout = float(llm.get("timeout", 120))
+        self.effort = effort_mod.normalize(llm.get("effort"))
+        self.reasoning_dropped = False  # the server refused the reasoning field once
+        self._stop = None
         self.auth = None  # resolved lazily so importing this module stays cheap
         self._usage = None
         self._reasoning = []
@@ -141,7 +145,10 @@ class ChatGPTBackend:
 
     # ---- chat ------------------------------------------------------------
 
-    def chat(self, messages, tools=None, on_text=None, on_reasoning=None):
+    def effective_max_tokens(self, override=None):
+        return None  # the ChatGPT plan API accepts no output limit
+
+    def chat(self, messages, tools=None, on_text=None, on_reasoning=None, max_tokens=None):
         instructions, items = to_responses_input(messages)
         kwargs = {
             "model": self.model,
@@ -152,10 +159,21 @@ class ChatGPTBackend:
         }
         if tools:
             kwargs["tools"] = to_responses_tools(tools)
+        reasoning = None if self.reasoning_dropped else effort_mod.responses_reasoning(None, self.effort)
+        if reasoning:
+            kwargs["reasoning"] = reasoning
         client = self._client()
         text_parts, tool_calls = [], []
         try:
-            stream = client.responses.create(**kwargs)
+            try:
+                stream = client.responses.create(**kwargs)
+            except Exception as error:
+                if not (reasoning and getattr(error, "status_code", None) in (400, 422)
+                        and "reasoning" in f"{error} {getattr(error, 'body', '')}".lower()):
+                    raise
+                self.reasoning_dropped = True  # this model has no such effort level: use its default
+                kwargs.pop("reasoning")
+                stream = client.responses.create(**kwargs)
             self._consume(stream, text_parts, tool_calls, on_text, on_reasoning)
         except LLMError as error:
             error._jarvis_partial = bool(text_parts or tool_calls)
@@ -176,6 +194,8 @@ class ChatGPTBackend:
         reasoning = "".join(self._reasoning).strip()
         if reasoning:
             msg["reasoning"] = reasoning
+        if self._stop:
+            msg["stop"] = self._stop
         if self._usage:
             msg["usage"] = self._usage
         return msg
@@ -183,6 +203,7 @@ class ChatGPTBackend:
     def _consume(self, stream, text_parts, tool_calls, on_text, on_reasoning):
         completed = False
         self._usage = None
+        self._stop = None
         self._reasoning = []
         for event in stream:
             kind = getattr(event, "type", "") or ""
@@ -205,6 +226,7 @@ class ChatGPTBackend:
                     })
             elif kind == "response.completed":
                 completed = True
+                self._stop = "tool_calls" if tool_calls else "end"
                 usage = getattr(getattr(event, "response", None), "usage", None)
                 out_tokens = getattr(usage, "output_tokens", None)
                 if isinstance(out_tokens, int):
@@ -220,7 +242,10 @@ class ChatGPTBackend:
             elif kind == "response.incomplete":
                 details = getattr(event.response, "incomplete_details", None)
                 reason = getattr(details, "reason", None) or "unknown"
-                raise LLMError(f"ChatGPT response incomplete: {reason}", retryable=False)
+                if reason not in ("max_output_tokens", "content_filter"):
+                    raise LLMError(f"ChatGPT response incomplete: {reason}", retryable=False)
+                completed = True  # a partial reply the agent loop can act on
+                self._stop = "length" if reason == "max_output_tokens" else "content_filter"
             elif kind == "error":
                 code = getattr(event, "code", None)
                 raise error_from_code(code) or LLMError(

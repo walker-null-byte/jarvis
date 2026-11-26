@@ -122,8 +122,11 @@ export function mountBuilder(container, draftId, ctx) {
     ui.modelBtn.setAttribute("aria-label", `Builder model: ${modelText}. Change`);
     const ok = !!draft.check?.ok;
     ui.review.disabled = !ok || busy || reviewing;
-    ui.hint.textContent = busy ? "The builder is working." : ok ? "" : `${draft.check?.problems?.length || 0} problems to fix first.`;
-    ui.review.title = busy ? "Wait for the builder to finish" : ok ? "" : "Fix the listed problems first";
+    const todo = draft.check?.todo?.length || 0;
+    const problems = draft.check?.problems?.length || 0;
+    const left = [todo ? `${todo} to do` : "", problems ? `${problems} problem${problems === 1 ? "" : "s"}` : ""].filter(Boolean).join(" and ");
+    ui.hint.textContent = busy ? "The builder is working." : ok ? "" : `${left} first.`;
+    ui.review.title = busy ? "Wait for the builder to finish" : ok ? "" : "The builder must finish the todo list and fix the problems first";
   }
 
   // ---------- model ----------

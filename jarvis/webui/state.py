@@ -249,6 +249,8 @@ class WebState:
             "backend": backend,
             "model": llm.get("model", ""),
             "base_url": llm.get("base_url", ""),
+            "effort": llm.get("effort", "") or "",
+            "max_tokens": llm.get("max_tokens"),
             "voice": {"enabled": bool(cfg.get("voice", {}).get("enabled")),
                       "engine": cfg.get("voice", {}).get("engine", "")},  # cheap; full info: voice_info()
             "security_mode": cfg.get("security", {}).get("mode", ""),

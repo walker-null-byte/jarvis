@@ -22,12 +22,13 @@ model = "gemma-4"  # or whatever model your server serves
 # For Gemini: set api_key_env = "GEMINI_API_KEY" and export the key
 api_key_env = "JARVIS_API_KEY"
 stream = true
-max_tokens = 4096
+# Output budget per reply. Reasoning tokens count against it, so thinking models need room.
+max_tokens = 16384
 timeout = 120
 retries = 2
 retry_delay = 1.0
-# Reasoning effort for backends that support it (anthropic: low|medium|high|xhigh|max).
-# Leave empty for the backend default.
+# Reasoning effort ("Thinking" in the chat box): "" (Auto, the model's default), "off", "low",
+# "medium" or "high" (anthropic also xhigh|max). Mapped to each provider's own setting.
 effort = ""
 
 [agent]
