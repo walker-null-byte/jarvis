@@ -6,6 +6,10 @@ without pulling in any SDK. Each preset names a backend:
 - "chat":      OpenAI-compatible Chat Completions (openai_chat.py)
 - "chatgpt":   Sign in with ChatGPT -> Responses API (chatgpt.py)
 - "anthropic": official anthropic SDK (anthropic_native.py)
+- "cloudflare": Chat Completions plus Cloudflare's model search (cloudflare.py)
+
+A preset may list "fields": non-secret values it needs beside the API key
+(see jarvis/provider_fields.py).
 """
 
 _LOCAL_KEY = "JARVIS_API_KEY"
@@ -24,6 +28,28 @@ def _chat(base_url, api_key_env, description, label, kind, order, default_model=
     if default_model:  # local servers serve whatever is loaded: no default
         preset["default_model"] = default_model
     return preset
+
+
+# Both Cloudflare presets use one endpoint, token and account; AI Gateway adds a header.
+_CF_ACCOUNT = {"key": "account_id", "env": "CLOUDFLARE_ACCOUNT_ID", "label": "Account ID",
+               "required": True, "placeholder": "From your Cloudflare dashboard"}
+_CF_GATEWAY = {"key": "gateway_id", "env": "CLOUDFLARE_GATEWAY_ID", "label": "Gateway ID",
+               "default": "default", "placeholder": "default"}
+
+
+def _cloudflare(label, description, order, fields, help_text):
+    return {
+        "label": label,
+        "kind": "api_key",
+        "order": order,
+        "backend": "cloudflare",
+        "base_url": "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+        "api_key_env": "CLOUDFLARE_API_TOKEN",
+        "description": description,
+        "default_model": "@cf/zai-org/glm-4.7-flash",
+        "fields": fields,
+        "help": help_text,
+    }
 
 
 PRESETS = {
@@ -46,6 +72,15 @@ PRESETS = {
     "deepseek": _chat("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", "DeepSeek API", "DeepSeek — API key", "api_key", 24, "deepseek-chat"),
     "mistral": _chat("https://api.mistral.ai/v1", "MISTRAL_API_KEY", "Mistral API", "Mistral — API key", "api_key", 25, "mistral-large-latest"),
     "xai": _chat("https://api.x.ai/v1", "XAI_API_KEY", "xAI Grok API", "xAI Grok — API key", "api_key", 26, "grok-4"),
+    "cloudflare": _cloudflare(
+        "Cloudflare Workers AI — API token", "Cloudflare Workers AI (open models)", 28, [_CF_ACCOUNT],
+        "Needs your Account ID and an API token with the Workers AI Read permission."),
+    "cloudflare-gateway": _cloudflare(
+        "Cloudflare AI Gateway — API token", "Cloudflare AI Gateway (Workers AI and third-party models)",
+        29, [_CF_ACCOUNT, _CF_GATEWAY],
+        "Needs your Account ID and an API token with the Workers AI Read permission. The list shows "
+        "Workers AI models; for others, type the id as author/model (e.g. openai/gpt-4.1). Those need "
+        "AI Gateway credits or your provider key stored in the gateway."),
     "chatgpt": {
         "label": "ChatGPT — sign in with your Plus/Pro plan",
         "kind": "subscription",

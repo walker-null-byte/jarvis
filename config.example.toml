@@ -11,6 +11,8 @@
 #   Gemini:       https://generativelanguage.googleapis.com/v1beta/openai/
 # Hosted presets (switch at runtime with /provider use <name>):
 #   openai, gemini, openrouter, groq, deepseek, mistral, xai, vllm
+#   cloudflare, cloudflare-gateway — set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID
+#                (optional CLOUDFLARE_GATEWAY_ID, default "default")
 #   chatgpt   — "Sign in with ChatGPT": uses your Plus/Pro plan (run /login chatgpt)
 #   anthropic — native Claude API via the official SDK (pip install 'jarvis[anthropic]')
 base_url = "http://localhost:1234/v1"

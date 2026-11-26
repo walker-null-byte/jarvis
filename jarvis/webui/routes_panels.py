@@ -11,6 +11,7 @@ from fastapi import APIRouter, Body, Depends
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
+from .. import provider_fields
 from .state import WebState, check_id, fail, web
 
 router = APIRouter(prefix="/api")
@@ -328,12 +329,14 @@ class ProviderBody(BaseModel):
     model: str = ""
     api_key_env: str = ""
     remember: bool = False  # save a typed literal key in the keystore under the provider's env name
+    fields: dict[str, str] = {}  # provider settings such as account_id; "" removes the saved value
 
 
 class TestBody(BaseModel):
     provider: str = ""
     base_url: str = ""
     api_key_env: str = ""
+    fields: dict[str, str] = {}
 
 
 # Settings the slash-command layer does not expose; validated here.
@@ -368,6 +371,22 @@ def _key_info(name):
             "saved_hint": keystore.hint(name) if name else ""}
 
 
+def _field_info(name):
+    """A preset's settings for the UI. They are ids, not secrets, so values are sent."""
+    return [{"key": f["key"], "label": f["label"], "env": f["env"],
+             "required": bool(f.get("required")), "placeholder": f.get("placeholder", ""),
+             "value": provider_fields.saved(f), "env_set": _env_is_set(f["env"]),
+             "set": bool(provider_fields.value(f))}
+            for f in provider_fields.fields_of(name)]
+
+
+def _clean_fields(provider, updates):
+    try:
+        return provider_fields.clean(provider, updates)
+    except ValueError as error:
+        fail(400, str(error))
+
+
 @router.get("/providers")
 def list_providers(state: WebState = Depends(web)):
     active = state.jarvis.config["llm"].get("provider", "custom")
@@ -381,12 +400,14 @@ def list_providers(state: WebState = Depends(web)):
                   **_key_info(preset.get("api_key_env", "")),
                   "description": preset.get("description", ""),
                   "default_model": preset.get("default_model", ""),
-                  "backend": preset.get("backend", "chat")}
+                  "backend": preset.get("backend", "chat"),
+                  "fields": _field_info(name),
+                  "help": preset.get("help", "")}
                  for name, preset in ordered]
     providers.append({"id": "custom", "label": "Custom — any OpenAI-compatible endpoint",
                       "kind": "api_key", "active": active == "custom", "base_url": "",
                       "api_key_env": "", "env_set": False, "saved": False, "saved_hint": "",
-                      "default_model": "", "backend": "chat",
+                      "default_model": "", "backend": "chat", "fields": [], "help": "",
                       "description": "Any reachable OpenAI-compatible endpoint"})
     llm = state.jarvis.config["llm"]
     # Booleans only: the key itself never leaves the server.
@@ -457,7 +478,9 @@ def set_provider(body: ProviderBody, state: WebState = Depends(web)):
     typed = body.api_key_env.strip()
     from ..commands import _split_credentials
     secret = _split_credentials(typed)[1]  # only a literal key is secret; env var names are fine to show
+    fields = _clean_fields(provider, body.fields)  # reject bad input before changing anything
     if provider in _presets():
+        provider_fields.save(provider, fields)
         env_name = _presets()[provider].get("api_key_env", "")
         remember = bool(body.remember and secret and env_name)
         if remember:  # save first: the provider switch below then finds the key
@@ -495,6 +518,7 @@ def test_provider(body: TestBody, state: WebState = Depends(web)):
     name = body.provider.strip().lower()
     typed = body.api_key_env.strip()
     preset = _presets().get(name)
+    fields = _clean_fields(name, body.fields)
     base_url, key_env, key = body.base_url.strip() or None, None, None
     if typed:
         key_env, key = _split_credentials(typed)
@@ -505,7 +529,7 @@ def test_provider(body: TestBody, state: WebState = Depends(web)):
             base_url, key_env = None, None  # the active provider: probe the live client
     ok, message, models, working_url = _test_connection(
         state.jarvis, base_url=base_url, api_key_env=key_env, api_key=key,
-        check_model=False, provider=name or None)
+        check_model=False, provider=name or None, **({"fields": fields} if fields else {}))
     return {"ok": ok, "message": _redact(message, key), "models": _chat_models(models), "base_url": working_url}
 
 

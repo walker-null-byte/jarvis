@@ -34,7 +34,9 @@ def test_presets_have_backends():
     assert PRESETS["chatgpt"]["backend"] == "chatgpt"
     assert PRESETS["anthropic"]["backend"] == "anthropic"
     assert PRESETS["anthropic"]["default_model"] == "claude-opus-5-5"
-    assert all(p["backend"] == "chat" for n, p in PRESETS.items() if n not in {"chatgpt", "anthropic"})
+    other = {"chatgpt", "anthropic", "cloudflare", "cloudflare-gateway"}
+    assert all(p["backend"] == "chat" for n, p in PRESETS.items() if n not in other)
+    assert PRESETS["cloudflare"]["backend"] == PRESETS["cloudflare-gateway"]["backend"] == "cloudflare"
     assert LLM(make_config("custom")).backend == "chat"
     assert LLM(make_config("chatgpt")).backend == "chatgpt"
 

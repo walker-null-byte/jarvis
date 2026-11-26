@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from . import keystore
+from . import keystore, provider_fields
 from .config import mind_dir
 from .events import Event
 from .providers import PRESETS
@@ -101,6 +101,9 @@ def provider_ready(provider, state=None):
         return ok, "" if ok else "Not signed in to ChatGPT"
     env = preset.get("api_key_env") or ""
     if preset.get("kind") == "api_key" and env:
+        absent = provider_fields.missing(provider)
+        if absent:
+            return False, f"No {absent[0]['label']} for {provider} ({absent[0]['env']})"
         if keystore.get(env) or os.environ.get(env):
             return True, ""
         return False, f"No API key for {provider} ({env})"

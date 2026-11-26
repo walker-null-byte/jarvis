@@ -786,3 +786,36 @@ def test_provider_test_uses_typed_literal_key_and_never_echoes_it(env, monkeypat
     # Applying with a literal key keeps it out of the response and off disk.
     out = env.client.post("/api/provider", json={"provider": "groq", "api_key_env": "gsk-secret-456"}).json()
     assert "gsk-secret-456" not in out["output"]
+
+
+def test_provider_fields_are_listed_saved_and_validated(env, monkeypatch):
+    import jarvis.commands as commands
+    from jarvis import provider_fields
+    from jarvis.providers import PRESETS
+    seen = {}
+
+    def fake(jarvis, **kwargs):
+        seen.update(kwargs)
+        return True, "ok", [], kwargs.get("base_url") or jarvis.config["llm"]["base_url"]
+    monkeypatch.setattr(commands, "_test_connection", fake)
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    account = PRESETS["cloudflare"]["fields"][0]
+    # Testing tries typed values without saving them.
+    env.client.post("/api/provider/test", json={"provider": "cloudflare", "fields": {"account_id": "typed1"}})
+    assert seen["fields"] == {"account_id": "typed1"} and provider_fields.saved(account) == ""
+    # A bad value changes nothing.
+    before = env.jarvis.config["llm"]["provider"]
+    bad = env.client.post("/api/provider", json={"provider": "cloudflare", "fields": {"account_id": "a/b"}})
+    assert bad.status_code == 400 and env.jarvis.config["llm"]["provider"] == before
+    out = env.client.post("/api/provider", json={
+        "provider": "cloudflare", "fields": {"account_id": "acc123"}})
+    assert out.status_code == 200
+    assert env.jarvis.llm.backend == "cloudflare"
+    assert "/accounts/acc123/ai/v1" in str(env.jarvis.llm.client.base_url)
+    by_id = {p["id"]: p for p in env.client.get("/api/providers").json()["providers"]}
+    shown = by_id["cloudflare-gateway"]["fields"]
+    assert [(f["key"], f["value"], f["set"]) for f in shown] == [
+        ("account_id", "acc123", True), ("gateway_id", "", True)]
+    # The slash command takes the same settings.
+    commands.handle_slash_command(env.jarvis, "/provider use cloudflare-gateway gateway_id=my-gw")
+    assert provider_fields.values("cloudflare-gateway") == {"account_id": "acc123", "gateway_id": "my-gw"}

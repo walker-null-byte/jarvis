@@ -107,7 +107,7 @@ class ChatBackend:
 
     name = "chat"
 
-    def __init__(self, llm):
+    def __init__(self, llm, headers=None):
         self.base_url = llm["base_url"]
         self.model = _bare_id(llm["model"])
         self.stream = llm["stream"]
@@ -120,6 +120,7 @@ class ChatBackend:
             api_key=resolve_key(llm),
             timeout=float(llm.get("timeout", 120)),
             max_retries=0,
+            default_headers=headers or None,
         )
 
     def list_models(self, timeout=5.0):

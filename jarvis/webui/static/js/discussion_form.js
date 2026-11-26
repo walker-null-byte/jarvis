@@ -158,7 +158,8 @@ function build(container, ctx, meta, providers, templateId) {
       box.setState({ loading: false, ...entry });
     } catch (error) { box.setState({ loading: false, items: [], error: error.message }); }
   }
-  const hasKey = (p) => p.kind !== "api_key" || p.id === "custom" || p.saved || p.env_set;
+  const hasKey = (p) => p.kind !== "api_key" || p.id === "custom"
+    || ((p.saved || p.env_set) && (p.fields || []).every((f) => !f.required || f.set));
   const modelPlaceholder = (providerId) => (providerById.get(providerId || currentProvider)?.default_model) || "model id (blank = default)";
 
   function modelBox(label, target, providerOf) {

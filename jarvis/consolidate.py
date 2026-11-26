@@ -15,6 +15,7 @@ from pathlib import Path
 
 from jarvis.memory import FactStore
 from jarvis.config import load_config, mind_dir
+from jarvis.providers import backend_for
 
 
 # ---------- git helpers ----------
@@ -281,7 +282,11 @@ def consolidate(mind=None, config=None, model_override=None, client=None):
         from openai import OpenAI
         llm_cfg = config["llm"]
         api_key = llm_cfg.get("api_key") or os.environ.get(llm_cfg["api_key_env"] or "") or "not-needed"
-        client = OpenAI(base_url=llm_cfg["base_url"], api_key=api_key)
+        if backend_for(llm_cfg.get("provider")) == "cloudflare":  # fills the URL and headers
+            from .providers.cloudflare import CloudflareBackend
+            client = CloudflareBackend({**llm_cfg, "timeout": 600}).client
+        else:
+            client = OpenAI(base_url=llm_cfg["base_url"], api_key=api_key)
     model = model_override or config["llm"]["model"]
 
     summary = {"facts_added": 0, "facts_updated": 0, "contradictions_resolved": 0,

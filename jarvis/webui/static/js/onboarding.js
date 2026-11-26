@@ -6,6 +6,7 @@ import { Select } from "./combo.js";
 import { el, toast } from "./dom.js";
 import { icon } from "./icons.js";
 import { providerOptions, shortName } from "./switcher.js";
+import { providerFields } from "./provider_fields.js";
 
 const STEPS = ["Welcome", "Connect a model", "Choose a character", "Quick tour"];
 
@@ -152,6 +153,7 @@ export function openOnboarding(ctx) {
     const rememberRow = el("label", { class: "check-row", for: "onboarding-remember" }, remember,
       el("span", { text: "Remember on this computer" }));
     const keyUse = el("button", { type: "button", class: "primary", text: "Use this provider" });
+    const extra = providerFields(() => {});
     let providers = [];
     api("/providers").then((data) => {
       providers = data.providers.filter((p) => p.kind === "api_key" && p.id !== "custom");
@@ -163,6 +165,7 @@ export function openOnboarding(ctx) {
       const p = providers.find((q) => q.id === providerSel.value);
       const envName = p?.api_key_env;
       keyInput.placeholder = envName ? `Paste your key (or leave empty to use ${envName})` : "Paste your key";
+      extra.show(p);
       const have = p?.saved || p?.env_set;
       keyNote.className = `key-status ${have ? "ok" : ""}`;
       const text = p?.saved ? `Saved key ${p.saved_hint}` : p?.env_set ? `Using ${envName} from your environment.`
@@ -173,6 +176,13 @@ export function openOnboarding(ctx) {
       const chosen = providers.find((p) => p.id === providerSel.value);
       if (!chosen) return;
       const typed = keyInput.value.trim();
+      const absent = extra.missing();
+      if (absent) {
+        keyNote.className = "key-status bad";
+        keyNote.replaceChildren(icon("alert", 15), el("span", { text: `Enter your ${absent.label} first.` }));
+        extra.focus(absent.key);
+        return;
+      }
       if (!typed && !chosen.env_set && !chosen.saved) {
         keyNote.className = "key-status bad";
         keyNote.replaceChildren(icon("alert", 15), el("span", { text: "Paste an API key first." }));
@@ -181,13 +191,15 @@ export function openOnboarding(ctx) {
       }
       // Keep the real preset (its backend matters, e.g. Anthropic); the server
       // applies the typed env var name or session-only key on top of it.
-      const body = typed ? { provider: chosen.id, api_key_env: typed, remember: remember.checked } : { provider: chosen.id };
+      const body = { provider: chosen.id, fields: extra.values() };
+      if (typed) Object.assign(body, { api_key_env: typed, remember: remember.checked });
       useProvider(body, shortName(chosen)).then(() => { keyInput.value = ""; return api("/providers"); })
         .then((data) => { providers = data.providers.filter((p) => p.kind === "api_key" && p.id !== "custom"); syncKeyHint(); })
         .catch(() => {});
     });
     keyBox.append(el("p", { class: "note", text: "Pay-as-you-go keys from OpenAI, Google, Anthropic, OpenRouter and others." }),
       el("div", { class: "field" }, el("span", { text: "Provider" }), providerSel.node),
+      extra.node,
       el("label", { class: "field" }, el("span", { text: "API key" }), keyInput),
       rememberRow, keyNote, el("div", { class: "row" }, keyUse));
 

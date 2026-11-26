@@ -39,7 +39,7 @@ def _dig_message(body):
                 return found
         return ""
     if isinstance(body, dict):
-        for key in ("error", "message", "detail", "error_description", "msg"):
+        for key in ("error", "errors", "message", "detail", "error_description", "msg"):
             if key in body:
                 found = _dig_message(body[key])
                 if found:

@@ -2,6 +2,7 @@ import { api } from "./api.js";
 import { ComboBox, Select } from "./combo.js";
 import { el, toast } from "./dom.js";
 import { icon } from "./icons.js";
+import { providerFields } from "./provider_fields.js";
 import { providerKind, providerOptions, shortName } from "./switcher.js";
 
 function field(label, control) {
@@ -25,6 +26,8 @@ export function renderSettings(container, ctx) {
   const endpointShown = el("input", { type: "text", readonly: true, "aria-label": "Endpoint" });
   const advanced = el("details", { class: "disclosure" }, el("summary", { text: "Advanced" }),
     el("div", { class: "disclosure-body" }, el("label", { class: "field" }, el("span", { text: "Endpoint" }), endpointShown)));
+  const extra = providerFields(() => { dirty = true; keyRejected = false; });
+  extra.node.addEventListener("change", () => ensureModels());
   const keyStatus = el("p", { class: "key-status", id: "provider-key-status", role: "status" });
   const keyInput = el("input", { type: "password", autocomplete: "new-password", spellcheck: false,
     "aria-label": "API key", "aria-describedby": "provider-key-status" });
@@ -59,7 +62,7 @@ export function renderSettings(container, ctx) {
   const providerField = el("div", { class: "field" }, el("span", { text: "Provider" }), provider.node);
   container.append(
     el("h4", { text: "Provider" }), providerField, description,
-    baseUrlField, keyField, rememberRow, keyStatus, modelField, advanced,
+    baseUrlField, extra.node, keyField, rememberRow, keyStatus, modelField, advanced,
     el("div", { class: "btn-row" }, apply, test), result, chatgpt,
     el("h4", { text: "Voice" }),
     el("p", { class: "note" }, "Voice engine, models and Auto-speak live in the ",
@@ -158,7 +161,8 @@ export function renderSettings(container, ctx) {
   function syncProviderFields() {
     const p = chosen();
     const kind = p ? (isCustom() ? "api_key" : providerKind(p)) : "";
-    description.textContent = isCustom() ? "Any server that speaks the OpenAI chat API (vLLM, a proxy, a self-hosted gateway)." : KIND_HELP[kind] || "";
+    description.textContent = isCustom() ? "Any server that speaks the OpenAI chat API (vLLM, a proxy, a self-hosted gateway)." : p?.help || KIND_HELP[kind] || "";
+    extra.show(p);
     // Base URL: editable and required for Custom only; presets show it under Advanced.
     baseUrlField.hidden = !isCustom();
     baseUrl.value = isCustom() ? (p && p.id === live.provider ? live.baseUrl : "") : "";
@@ -181,21 +185,23 @@ export function renderSettings(container, ctx) {
     if (p) ensureModels();
   }
 
-  function requestBody(extra = {}) {
+  function requestBody(more = {}) {
     const p = chosen();
-    const body = { provider: provider.value, base_url: baseUrl.value.trim(), ...extra };
+    const body = { provider: provider.value, base_url: baseUrl.value.trim(), fields: extra.values(), ...more };
     if (usesKey(p) && keyInput.value.trim()) body.api_key_env = keyInput.value.trim();
     return body;
   }
 
   // ---- model list (follows the provider dropdown) ----
-  const modelKey = () => `${provider.value}|${baseUrl.value.trim()}|${keyInput.value.trim() ? "k" : ""}`;
+  const modelKey = () => `${provider.value}|${baseUrl.value.trim()}|${keyInput.value.trim() ? "k" : ""}|${JSON.stringify(extra.values())}`;
 
   async function ensureModels(force = false) {
     const p = chosen();
     if (!p) return;
     if (!force && loadedFor === modelKey()) return;
     if (isCustom() && !baseUrl.value.trim()) { modelBox.setState({ items: [], error: "Enter a base URL to list models.", loading: false }); return; }
+    const absent = extra.missing();
+    if (absent) { modelBox.setState({ items: [], error: `Enter your ${absent.label} to list models. You can still type a model id.`, loading: false }); loadedFor = ""; return; }
     if (!hasKey(p)) { modelBox.setState({ items: [], error: "Add an API key to list models. You can still type a model id.", loading: false }); loadedFor = ""; return; }
     const run = ++modelRun;
     const key = modelKey();
@@ -222,6 +228,8 @@ export function renderSettings(container, ctx) {
     const p = chosen();
     if (!p) return "Choose a provider first.";
     if (isCustom() && !baseUrl.value.trim()) return "Enter the base URL of your endpoint.";
+    const absent = extra.missing();
+    if (absent) { extra.focus(absent.key); return `Enter your ${absent.label}.`; }
     return "";
   }
 

@@ -100,7 +100,24 @@ prompt. Both share the same agent, memory and slash commands.
 | OpenAI API | Pay-as-you-go API key | `OPENAI_API_KEY` |
 | Anthropic (Claude) | API key | `ANTHROPIC_API_KEY` |
 | Gemini, OpenRouter, Groq, DeepSeek, Mistral, xAI | API key | paste in Settings, or each provider's `*_API_KEY` |
+| Cloudflare Workers AI, AI Gateway | Cloudflare API token | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` ([details](#cloudflare)) |
 | Any OpenAI-compatible server | — | `/provider set URL KEY_OR_ENV` |
+
+#### Cloudflare
+
+Both presets need your **Account ID** and an API token with the **Workers AI
+Read** permission (AI Gateway permissions alone are rejected). Enter them in
+Settings, set the two environment variables, or run
+`/provider use cloudflare account_id=YOUR_ID` and provide the token by
+environment variable.
+
+- **Workers AI** serves Cloudflare-hosted open models (`@cf/…`).
+- **AI Gateway** sends requests through your gateway (logs, caching, limits).
+  Leave Gateway ID empty to use `default`, which Cloudflare creates on the first
+  request; other gateways must already exist. The model list shows only Workers
+  AI models because Cloudflare has no API listing the rest. Type third-party ids
+  as `author/model`, such as `openai/gpt-4.1`; these need AI Gateway credits or
+  your provider key stored in the gateway.
 
 *ChatGPT* and *OpenAI API* are different on purpose: ChatGPT uses the
 subscription you already have; the OpenAI API bills per token. ChatGPT sign-in
@@ -321,6 +338,11 @@ ruff check .
 ---
 
 ## Changelog
+
+### 1.2.0 — 2026-11-26
+
+**New**
+- **Cloudflare Workers AI** and **Cloudflare AI Gateway** providers.
 
 ### 1.1.2 — 2026-11-25
 

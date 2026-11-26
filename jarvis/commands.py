@@ -5,6 +5,7 @@ import os
 import shlex
 from urllib.parse import urlparse
 
+from . import provider_fields
 from .config import (
     DEFAULTS,
     remember_model,
@@ -353,6 +354,7 @@ def _help():
 /provider                             Open the provider manager (TUI)
 /provider list                        List supported provider presets
 /provider use NAME                    Switch provider preset
+/provider use NAME SETTING=VALUE      ...with its settings (Cloudflare: account_id, gateway_id)
 /provider set URL [KEY_OR_ENV]        Configure a custom endpoint; paste an
                                       API key or the name of an env var
 /provider test [NAME]                 Test the connection (current or preset)
@@ -432,6 +434,14 @@ def _provider(jarvis, args):
     # Remember the model we were using so switching back restores it.
     previous_provider = jarvis.config["llm"].get("provider", "custom")
     remember_model(jarvis.config, previous_provider, jarvis.config["llm"].get("model", ""))
+
+    if provider in PROVIDER_PRESETS and len(args) > 1:  # e.g. account_id=...
+        if not all("=" in arg for arg in args[1:]):
+            return f"Usage: /provider use {provider} [SETTING=VALUE ...]"
+        try:
+            provider_fields.save(provider, dict(arg.split("=", 1) for arg in args[1:]))
+        except ValueError as error:
+            return str(error)
 
     if provider in PROVIDER_PRESETS:
         preset = PROVIDER_PRESETS[provider]
@@ -602,7 +612,8 @@ def _split_credentials(raw):
     return None, raw
 
 
-def _test_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True, provider=None):
+def _test_connection(jarvis, base_url=None, api_key_env=None, api_key=None, timeout=5.0, check_model=True, provider=None,
+                     fields=None):
     """Probe an endpoint and return ``(ok, message, model_ids, working_url)``.
 
     Probes the live client unless *base_url* (and optionally credentials)
@@ -617,10 +628,12 @@ def _test_connection(jarvis, base_url=None, api_key_env=None, api_key=None, time
     probe = jarvis.llm
     if provider is None and base_url is not None:
         provider = _provider_for_url(base_url)
-    if base_url is not None or api_key_env or api_key or provider:
+    if base_url is not None or api_key_env or api_key or provider or fields:
         probe_config = copy.deepcopy(jarvis.config)
         if provider:
             probe_config["llm"]["provider"] = provider
+        if fields:  # unsaved provider settings being tried out
+            probe_config["llm"]["fields"] = fields
         if base_url is not None:
             probe_config["llm"]["base_url"] = base_url
         if api_key_env:

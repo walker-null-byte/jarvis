@@ -4,6 +4,7 @@ Backends (jarvis/providers/):
   chat      OpenAI-compatible Chat Completions (LM Studio, Ollama, vLLM, ...)
   chatgpt   Sign in with ChatGPT -> Responses API
   anthropic official anthropic SDK
+  cloudflare Workers AI / AI Gateway (Chat Completions)
 
 Every backend exposes ``chat(messages, tools, on_text, on_reasoning)``,
 ``list_models(timeout)`` and ``check_model(ids, timeout)``.
@@ -13,7 +14,7 @@ import re
 import time
 
 from .providers import PRESETS, backend_for
-from .providers.errors import Cancelled, LLMError, explain_error
+from .providers.errors import Cancelled, LLMError, _dig_message, explain_error
 from .providers.openai_chat import ChatBackend, resolve_key
 
 __all__ = ["LLM", "LLMError", "Cancelled"]
@@ -32,6 +33,9 @@ def _build_backend(name, llm):
     if name == "chatgpt":
         from .providers.chatgpt import ChatGPTBackend
         return ChatGPTBackend(llm)
+    if name == "cloudflare":
+        from .providers.cloudflare import CloudflareBackend
+        return CloudflareBackend(llm)
     return ChatBackend(llm)
 
 
@@ -202,7 +206,7 @@ class LLM:
                     raise wrapped from (None if wrapped is error else error)
                 time.sleep(self.retry_delay * (2 ** attempt))
                 continue
-            msg["stats"] = timing.stats(msg, self.model, self.stream if self.backend == "chat" else True)
+            msg["stats"] = timing.stats(msg, self.model, self.stream if self.backend in ("chat", "cloudflare") else True)
             return msg
 
     def _wrap_error(self, error):
@@ -213,6 +217,9 @@ class LLM:
             return error
         label = (PRESETS.get(self.provider, {}).get("label") or "").split(" — ")[0]  # custom servers: named by host
         message, status, details = explain_error(error, label, self.base_url)
+        hint = getattr(self._impl, "hints", {}).get(status)
+        if hint:  # replace the generic hint with the backend's more specific one
+            message = message.removesuffix(" Check the API key.") + hint
         return LLMError(message, status=status, details=details, provider=self.provider)
 
 
@@ -223,11 +230,7 @@ def _probe_error_message(error, base_url, v1_hint=False):
     if response is not None:
         try:
             data = response.json()
-            message = (
-                data.get("error", {}).get("message")
-                or data.get("message")
-                or str(error)
-            )
+            message = _dig_message(data) or str(error)
         except Exception:
             text = response.text or ""
             match = re.search(r"<title>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
